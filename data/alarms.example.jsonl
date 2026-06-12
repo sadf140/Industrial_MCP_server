@@ -1,0 +1,3 @@
+{"timestamp":"2026-06-11T08:20:00Z","device_id":"pump-1","severity":"warning","code":"TEMP_HIGH","message":"Bearing temperature exceeded warning threshold","state":"active","source":"motor_bearing","acknowledged":false}
+{"timestamp":"2026-06-11T08:32:00Z","device_id":"pump-1","severity":"warning","code":"TEMP_HIGH","message":"Bearing temperature remained high for 10 minutes","state":"active","source":"motor_bearing","acknowledged":false}
+{"timestamp":"2026-06-11T08:45:00Z","device_id":"pump-1","severity":"info","code":"OPERATOR_CHECK","message":"Operator inspected cooling water flow","state":"cleared","source":"operator_log","acknowledged":true}

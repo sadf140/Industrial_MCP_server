@@ -1,0 +1,31 @@
+# Build outputs
+build*/
+manual-build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Binaries and libraries
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.pdb
+*.so
+*.dylib
+
+# Runtime logs and local data
+*.log
+data/audit*.jsonl
+
+# Editor and OS files
+.vscode/
+.idea/
+.vs/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,55 @@
+{
+  "server": {
+    "name": "industrial-mcp-server",
+    "version": "0.3.0-p1",
+    "read_only": true
+  },
+  "opcua": {
+    "connect_timeout_ms": 3000,
+    "read_timeout_ms": 3000,
+    "retry_count": 1,
+    "retry_delay_ms": 200,
+    "allow_raw_node_id": false
+  },
+  "audit": {
+    "log_path": "../data/audit.example.jsonl"
+  },
+  "alarm_log_path": "../data/alarms.example.jsonl",
+  "devices": [
+    {
+      "id": "pump-1",
+      "name": "Cooling Pump 1",
+      "endpoint": "mock://pump-1",
+      "variables": [
+        {
+          "name": "temperature",
+          "node_id": "ns=2;s=Pump1.Temperature",
+          "data_type": "Double",
+          "unit": "C",
+          "description": "motor bearing temperature",
+          "mock_value": 82.5,
+          "warn_max": 80,
+          "alarm_max": 95
+        },
+        {
+          "name": "current",
+          "node_id": "ns=2;s=Pump1.Current",
+          "data_type": "Double",
+          "unit": "A",
+          "description": "motor phase current",
+          "mock_value": 14.2,
+          "warn_max": 16,
+          "alarm_max": 20
+        },
+        {
+          "name": "running",
+          "node_id": "ns=2;s=Pump1.Running",
+          "data_type": "Boolean",
+          "unit": "",
+          "description": "running feedback",
+          "mock_value": true
+        }
+      ]
+    }
+  ]
+}
