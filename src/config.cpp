@@ -88,6 +88,7 @@ AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir)
         config.opcua.retry_count = optional_int(opcua, "retry_count", config.opcua.retry_count);
         config.opcua.retry_delay_ms = optional_int(opcua, "retry_delay_ms", config.opcua.retry_delay_ms);
         config.opcua.allow_raw_node_id = optional_bool(opcua, "allow_raw_node_id", config.opcua.allow_raw_node_id);
+        config.opcua.write_enabled = optional_bool(opcua, "write_enabled", config.opcua.write_enabled);
     }
 
     if (root.contains("audit") && root.at("audit").is_object()) {
@@ -129,6 +130,7 @@ AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir)
             variable.unit = optional_string(variable_json, "unit");
             variable.description = optional_string(variable_json, "description");
             variable.mock_value = variable_json.contains("mock_value") ? variable_json.at("mock_value") : Json(nullptr);
+            variable.writable = optional_bool(variable_json, "writable", variable.writable);
             variable.warn_min = optional_number(variable_json, "warn_min");
             variable.warn_max = optional_number(variable_json, "warn_max");
             variable.alarm_min = optional_number(variable_json, "alarm_min");

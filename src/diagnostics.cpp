@@ -67,6 +67,11 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
     status_evidence["online"] = status.online;
     status_evidence["session_state"] = status.session_state;
     status_evidence["error"] = status.error;
+    status_evidence["latency_ms"] = status.latency_ms;
+    status_evidence["disconnect_count"] = status.disconnect_count;
+    status_evidence["consecutive_failures"] = status.consecutive_failures;
+    status_evidence["last_success_at"] = status.last_success_at;
+    status_evidence["last_error_at"] = status.last_error_at;
     evidence.push_back(status_evidence);
 
     if (!status.online) {
@@ -75,6 +80,12 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
                                         status_evidence,
                                         "check network reachability, endpoint URL, OPC UA server state, and security policy",
                                         0.85));
+    } else if (status.consecutive_failures > 0 || status.disconnect_count > 0) {
+        possible_causes.push_back(cause("INTERMITTENT_COMMUNICATION",
+                                        "recent OPC UA communication failures were observed",
+                                        status_evidence,
+                                        "inspect network stability, gateway logs, OPC UA server load, and switch port diagnostics",
+                                        0.58));
     }
 
     std::vector<const VariableConfig*> variable_refs;
@@ -151,7 +162,7 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
 
     Json actions = Json::array();
     actions.push_back("verify the diagnosis with field instrumentation and equipment manuals");
-    actions.push_back("do not issue control commands through this read-only MCP server");
+    actions.push_back("treat write_node as a controlled maintenance operation only when explicitly enabled and whitelisted");
     actions.push_back("collect more data if confidence is low or evidence is incomplete");
 
     if (!symptom.empty()) {

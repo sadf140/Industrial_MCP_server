@@ -9,7 +9,8 @@
     "read_timeout_ms": 3000,
     "retry_count": 1,
     "retry_delay_ms": 200,
-    "allow_raw_node_id": false
+    "allow_raw_node_id": false,
+    "write_enabled": false
   },
   "audit": {
     "log_path": "../data/audit.example.jsonl"
@@ -28,6 +29,7 @@
           "unit": "C",
           "description": "motor bearing temperature",
           "mock_value": 82.5,
+          "writable": false,
           "warn_max": 80,
           "alarm_max": 95
         },
@@ -38,6 +40,7 @@
           "unit": "A",
           "description": "motor phase current",
           "mock_value": 14.2,
+          "writable": false,
           "warn_max": 16,
           "alarm_max": 20
         },
@@ -47,7 +50,8 @@
           "data_type": "Boolean",
           "unit": "",
           "description": "running feedback",
-          "mock_value": true
+          "mock_value": true,
+          "writable": false
         }
       ]
     }

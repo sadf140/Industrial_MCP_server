@@ -21,6 +21,7 @@ struct OpcUaRuntimeConfig {
     int retry_count = 1;
     int retry_delay_ms = 200;
     bool allow_raw_node_id = false;
+    bool write_enabled = false;
 };
 
 struct AuditConfig {
@@ -34,6 +35,7 @@ struct VariableConfig {
     std::string unit;
     std::string description;
     Json mock_value;
+    bool writable = false;
     std::optional<double> warn_min;
     std::optional<double> warn_max;
     std::optional<double> alarm_min;

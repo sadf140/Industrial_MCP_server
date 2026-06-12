@@ -39,6 +39,12 @@ uint16_t parse_port(int argc, char** argv) {
     return port;
 }
 
+opcua::VariableAttributes writable_attributes() {
+    return opcua::VariableAttributes{}.setAccessLevel(
+        opcua::AccessLevel::CurrentRead | opcua::AccessLevel::CurrentWrite
+    );
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -52,13 +58,13 @@ int main(int argc, char** argv) {
         opcua::Server server{std::move(server_config)};
 
         opcua::Node objects{server, opcua::ObjectId::ObjectsFolder};
-        auto temperature = objects.addVariable({1, "Pump1.Temperature"}, "Pump1.Temperature");
+        auto temperature = objects.addVariable({1, "Pump1.Temperature"}, "Pump1.Temperature", writable_attributes());
         temperature.writeValue(opcua::Variant{42.25});
-        auto current = objects.addVariable({1, "Pump1.Current"}, "Pump1.Current");
+        auto current = objects.addVariable({1, "Pump1.Current"}, "Pump1.Current", writable_attributes());
         current.writeValue(opcua::Variant{14.2});
-        auto running = objects.addVariable({1, "Pump1.Running"}, "Pump1.Running");
+        auto running = objects.addVariable({1, "Pump1.Running"}, "Pump1.Running", writable_attributes());
         running.writeValue(opcua::Variant{true});
-        auto label = objects.addVariable({1, "Pump1.Label"}, "Pump1.Label");
+        auto label = objects.addVariable({1, "Pump1.Label"}, "Pump1.Label", writable_attributes());
         label.writeValue(opcua::Variant{std::string{"pump-alpha"}});
 
         std::cerr << "opcua-sim-server listening on opc.tcp://127.0.0.1:" << port << '\n'

@@ -27,7 +27,8 @@ void AuditLogger::record_tool_call(const std::string& tool_name,
                                    bool ok,
                                    long long elapsed_ms,
                                    const std::string& error_code,
-                                   const Json& arguments) {
+                                   const Json& arguments,
+                                   bool read_only) {
     if (path_.empty()) {
         return;
     }
@@ -39,7 +40,7 @@ void AuditLogger::record_tool_call(const std::string& tool_name,
         {"device_id", device_id},
         {"ok", ok},
         {"elapsed_ms", elapsed_ms},
-        {"read_only", true},
+        {"read_only", read_only},
         {"arguments", sanitized_arguments(arguments)},
     };
     if (!error_code.empty()) {

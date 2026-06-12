@@ -16,7 +16,8 @@ public:
                           bool ok,
                           long long elapsed_ms,
                           const std::string& error_code,
-                          const Json& arguments);
+                          const Json& arguments,
+                          bool read_only = true);
 
 private:
     std::string path_;

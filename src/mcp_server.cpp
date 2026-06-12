@@ -27,6 +27,18 @@ Json schema_integer(const std::string& description = {}, int minimum = 0) {
     return schema;
 }
 
+Json schema_boolean(const std::string& description = {}) {
+    Json schema = {{"type", "boolean"}};
+    if (!description.empty()) schema["description"] = description;
+    return schema;
+}
+
+Json schema_value(const std::string& description = {}) {
+    Json schema = {{"type", Json::array({"boolean", "number", "integer", "string"})}};
+    if (!description.empty()) schema["description"] = description;
+    return schema;
+}
+
 Json object_schema(Json properties, Json required = Json::array()) {
     return {
         {"type", "object"},
@@ -88,6 +100,12 @@ Json status_to_json(const DeviceStatus& status) {
         {"last_read_time", status.last_read_time},
         {"error", status.error},
         {"attempts", status.attempts},
+        {"latency_ms", status.latency_ms},
+        {"disconnect_count", status.disconnect_count},
+        {"consecutive_failures", status.consecutive_failures},
+        {"last_success_at", status.last_success_at},
+        {"last_error_at", status.last_error_at},
+        {"last_error", status.last_error},
         {"read_only", true},
     };
 }
@@ -116,13 +134,54 @@ Json read_result_to_json(const OpcUaReadResult& read,
     return out;
 }
 
-Json tool(const std::string& name, const std::string& description, Json input_schema, Json output_schema) {
+Json write_result_to_json(const OpcUaWriteResult& write,
+                          const std::string& device_id,
+                          const VariableConfig& variable) {
+    return {
+        {"device_id", device_id},
+        {"variable", variable.name},
+        {"node_id", variable.node_id},
+        {"ok", write.ok},
+        {"written_value", write.value},
+        {"data_type", write.data_type},
+        {"timestamp", write.timestamp},
+        {"quality", write.quality},
+        {"status_code", write.status_code},
+        {"error", write.error},
+        {"error_code", write.error_code},
+        {"attempts", write.attempts},
+        {"latency_ms", write.latency_ms},
+        {"read_only", false},
+    };
+}
+
+Json variable_to_json(const VariableConfig& variable) {
+    Json out = {
+        {"name", variable.name},
+        {"node_id", variable.node_id},
+        {"data_type", variable.data_type},
+        {"unit", variable.unit},
+        {"description", variable.description},
+        {"writable", variable.writable},
+    };
+    if (variable.warn_min) out["warn_min"] = *variable.warn_min;
+    if (variable.warn_max) out["warn_max"] = *variable.warn_max;
+    if (variable.alarm_min) out["alarm_min"] = *variable.alarm_min;
+    if (variable.alarm_max) out["alarm_max"] = *variable.alarm_max;
+    return out;
+}
+
+Json tool(const std::string& name,
+          const std::string& description,
+          Json input_schema,
+          Json output_schema,
+          bool read_only = true) {
     return {
         {"name", name},
         {"description", description},
         {"inputSchema", std::move(input_schema)},
         {"outputSchema", std::move(output_schema)},
-        {"annotations", {{"readOnlyHint", true}}},
+        {"annotations", {{"readOnlyHint", read_only}}},
     };
 }
 
@@ -139,6 +198,21 @@ Json read_node_input_schema() {
 
 Json device_id_input_schema() {
     return object_schema({{"device_id", schema_string("Configured device id.")}}, Json::array({"device_id"}));
+}
+
+Json optional_device_id_input_schema() {
+    return object_schema({{"device_id", schema_string("Optional configured device id.")}});
+}
+
+Json write_node_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"variable", schema_string("Configured writable variable name.")},
+            {"value", schema_value("Boolean, number, integer, or string value matching the configured data_type.")},
+        },
+        Json::array({"device_id", "variable", "value"})
+    );
 }
 
 Json alarm_query_input_schema() {
@@ -197,6 +271,10 @@ std::string tool_error_code(const Json& result) {
         return content.at("error").get<std::string>();
     }
     return {};
+}
+
+bool tool_call_read_only(const std::string& tool_name) {
+    return tool_name != "write_node";
 }
 
 } // namespace
@@ -286,7 +364,8 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
                 tool_result_ok(result),
                 elapsed,
                 tool_error_code(result),
-                args
+                args,
+                tool_call_read_only(tool_name)
             );
             return make_response(id, result);
         }
@@ -300,9 +379,14 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
 Json McpServer::list_tools() const {
     Json tools = Json::array();
     tools.push_back(tool("get_gateway_health", "Return read-only gateway health, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
+    tools.push_back(tool("read_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
     tools.push_back(tool("read_opcua_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
+    tools.push_back(tool("write_node", "Write one whitelisted configured OPC UA variable. Disabled unless server and config explicitly allow writes.", write_node_input_schema(), generic_output_schema(), false));
+    tools.push_back(tool("list_devices", "List configured industrial devices and their OPC UA variables without opening network sessions.", object_schema(Json::object()), generic_output_schema()));
     tools.push_back(tool("read_device_snapshot", "Read all configured variables for a device.", device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_device_status", "Return read-only device and OPC UA session status.", device_id_input_schema(), generic_output_schema()));
+    tools.push_back(tool("get_network_status", "Return per-device OPC UA communication status, latency, and disconnect counters.", optional_device_id_input_schema(), generic_output_schema()));
+    tools.push_back(tool("get_alarm_history", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
     tools.push_back(tool("query_alarm_logs", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
     tools.push_back(tool("analyze_alarms", "Summarize alarm counts, frequent codes, and timeline.", alarm_query_input_schema(), generic_output_schema()));
     tools.push_back(tool("diagnose_fault", "Run rule-based fault diagnosis with evidence and limitations.", diagnose_input_schema(), generic_output_schema()));
@@ -325,7 +409,50 @@ Json McpServer::call_tool(const Json& params) {
             return tool_result(status_to_json(opcua_.get_status(*device, config_.opcua)));
         }
 
-        if (name == "read_opcua_node") {
+        if (name == "list_devices") {
+            Json devices = Json::array();
+            for (const auto& device : config_.devices) {
+                Json variables = Json::array();
+                for (const auto& [_, variable] : device.variables) {
+                    variables.push_back(variable_to_json(variable));
+                }
+                devices.push_back({
+                    {"id", device.id},
+                    {"name", device.name},
+                    {"endpoint", device.endpoint},
+                    {"endpoint_type", device.endpoint.rfind("mock://", 0) == 0 ? "mock" : "opcua"},
+                    {"variable_count", static_cast<int>(device.variables.size())},
+                    {"variables", variables},
+                });
+            }
+            return tool_result({
+                {"count", static_cast<int>(config_.devices.size())},
+                {"devices", devices},
+                {"read_only", true},
+            });
+        }
+
+        if (name == "get_network_status") {
+            Json devices = Json::array();
+            const auto device_id = optional_arg_string(args, "device_id");
+            if (!device_id.empty()) {
+                const auto* device = find_device(config_, device_id);
+                if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+                devices.push_back(status_to_json(opcua_.get_status(*device, config_.opcua)));
+            } else {
+                for (const auto& device : config_.devices) {
+                    devices.push_back(status_to_json(opcua_.get_status(device, config_.opcua)));
+                }
+            }
+            return tool_result({
+                {"timestamp", now_utc_iso8601()},
+                {"count", static_cast<int>(devices.size())},
+                {"devices", devices},
+                {"read_only", true},
+            });
+        }
+
+        if (name == "read_node" || name == "read_opcua_node") {
             const auto device_id = required_arg_string(args, "device_id");
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
@@ -345,10 +472,45 @@ Json McpServer::call_tool(const Json& params) {
                 }
                 variable = find_variable(*device, node_id);
             } else {
-                return tool_error("INVALID_ARGUMENT", "read_opcua_node requires variable or node_id");
+                return tool_error("INVALID_ARGUMENT", "read_node requires variable or node_id");
             }
 
             return tool_result(read_result_to_json(opcua_.read_node(*device, variable, node_id, config_.opcua), device_id, node_id, variable));
+        }
+
+        if (name == "write_node") {
+            if (config_.server.read_only) {
+                return tool_error("WRITE_DISABLED", "server.read_only must be false before write_node can be used");
+            }
+            if (!config_.opcua.write_enabled) {
+                return tool_error("WRITE_DISABLED", "opcua.write_enabled must be true before write_node can be used");
+            }
+            const auto device_id = required_arg_string(args, "device_id");
+            const auto variable_name = required_arg_string(args, "variable");
+            if (!args.contains("value")) {
+                return tool_error("INVALID_ARGUMENT", "write_node requires value");
+            }
+
+            const auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            const auto* variable = find_variable(*device, variable_name);
+            if (variable == nullptr) return tool_error("VARIABLE_NOT_FOUND", "unknown variable: " + variable_name);
+            if (!variable->writable) {
+                return tool_error("WRITE_NOT_ALLOWED", "variable is not marked writable in configuration: " + variable_name);
+            }
+
+            const auto write = opcua_.write_node(*device, *variable, args.at("value"), config_.opcua);
+            auto payload = write_result_to_json(write, device_id, *variable);
+            if (!write.ok) {
+                if (!payload.contains("error_code") || !payload.at("error_code").is_string() || payload.at("error_code").get<std::string>().empty()) {
+                    payload["error_code"] = "OPCUA_WRITE_FAILED";
+                }
+                payload["error"] = payload.at("error").get<std::string>().empty()
+                    ? "write failed"
+                    : payload.at("error").get<std::string>();
+                return tool_result(payload, true);
+            }
+            return tool_result(payload);
         }
 
         if (name == "read_device_snapshot") {
@@ -380,7 +542,7 @@ Json McpServer::call_tool(const Json& params) {
             });
         }
 
-        if (name == "query_alarm_logs" || name == "analyze_alarms") {
+        if (name == "get_alarm_history" || name == "query_alarm_logs" || name == "analyze_alarms") {
             AlarmQuery query;
             query.device_id = optional_arg_string(args, "device_id");
             query.start_time = optional_arg_string(args, "start_time");
@@ -388,7 +550,7 @@ Json McpServer::call_tool(const Json& params) {
             query.severity = optional_arg_string(args, "severity");
             query.keyword = optional_arg_string(args, "keyword");
             query.limit = optional_arg_limit(args, 100);
-            return tool_result(name == "query_alarm_logs" ? alarms_.query_json(query) : alarms_.analyze_json(query));
+            return tool_result(name == "analyze_alarms" ? alarms_.analyze_json(query) : alarms_.query_json(query));
         }
 
         if (name == "diagnose_fault") {
@@ -441,6 +603,7 @@ Json McpServer::gateway_health() const {
             {"retry_count", config_.opcua.retry_count},
             {"retry_delay_ms", config_.opcua.retry_delay_ms},
             {"allow_raw_node_id", config_.opcua.allow_raw_node_id},
+            {"write_enabled", config_.opcua.write_enabled},
         }},
         {"audit", {{"enabled", !config_.audit.log_path.empty()}, {"log_path_configured", !config_.audit.log_path.empty()}}},
         {"alarms", {{"log_path_configured", !config_.alarm_log_path.empty()}}},

@@ -2,14 +2,15 @@
   "server": {
     "name": "industrial-mcp-server",
     "version": "0.4.0-p2",
-    "read_only": true
+    "read_only": false
   },
   "opcua": {
     "connect_timeout_ms": 3000,
     "read_timeout_ms": 3000,
     "retry_count": 1,
     "retry_delay_ms": 200,
-    "allow_raw_node_id": false
+    "allow_raw_node_id": false,
+    "write_enabled": true
   },
   "audit": {
     "log_path": "../data/audit.opcua-sim.jsonl"
@@ -27,6 +28,7 @@
           "data_type": "Double",
           "unit": "C",
           "description": "motor bearing temperature",
+          "writable": true,
           "warn_max": 80,
           "alarm_max": 95
         },
@@ -36,6 +38,7 @@
           "data_type": "Double",
           "unit": "A",
           "description": "motor phase current",
+          "writable": true,
           "warn_max": 16,
           "alarm_max": 20
         },
@@ -44,14 +47,16 @@
           "node_id": "ns=1;s=Pump1.Running",
           "data_type": "Boolean",
           "unit": "",
-          "description": "running feedback"
+          "description": "running feedback",
+          "writable": true
         },
         {
           "name": "label",
           "node_id": "ns=1;s=Pump1.Label",
           "data_type": "String",
           "unit": "",
-          "description": "simulated equipment label"
+          "description": "simulated equipment label",
+          "writable": true
         }
       ]
     }
