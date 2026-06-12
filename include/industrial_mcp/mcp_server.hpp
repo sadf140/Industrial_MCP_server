@@ -6,8 +6,10 @@
 #include "industrial_mcp/diagnostics.hpp"
 #include "industrial_mcp/opcua_client.hpp"
 
+#include <chrono>
 #include <iosfwd>
 #include <optional>
+#include <string>
 
 namespace industrial_mcp {
 
@@ -24,9 +26,12 @@ private:
     AlarmStore alarms_;
     AuditLogger audit_;
     DiagnosticsEngine diagnostics_;
+    std::chrono::steady_clock::time_point started_at_;
+    std::string started_at_utc_;
 
     Json list_tools() const;
     Json call_tool(const Json& params);
+    Json gateway_health() const;
 };
 
 } // namespace industrial_mcp

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(industrial_mcp_server VERSION 0.3.0 LANGUAGES C CXX)
+project(industrial_mcp_server VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +62,11 @@ endif()
 
 add_executable(industrial-mcp-server src/main.cpp)
 target_link_libraries(industrial-mcp-server PRIVATE industrial_mcp_core)
+
+if(INDUSTRIAL_MCP_WITH_OPCUA)
+    add_executable(opcua-sim-server src/opcua_sim_server.cpp)
+    target_link_libraries(opcua-sim-server PRIVATE open62541pp::open62541pp)
+endif()
 
 if(INDUSTRIAL_MCP_BUILD_TESTS)
     enable_testing()

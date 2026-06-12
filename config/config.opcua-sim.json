@@ -12,42 +12,46 @@
     "allow_raw_node_id": false
   },
   "audit": {
-    "log_path": "../data/audit.example.jsonl"
+    "log_path": "../data/audit.opcua-sim.jsonl"
   },
   "alarm_log_path": "../data/alarms.example.jsonl",
   "devices": [
     {
       "id": "pump-1",
       "name": "Cooling Pump 1",
-      "endpoint": "mock://pump-1",
+      "endpoint": "opc.tcp://127.0.0.1:48520",
       "variables": [
         {
           "name": "temperature",
-          "node_id": "ns=2;s=Pump1.Temperature",
+          "node_id": "ns=1;s=Pump1.Temperature",
           "data_type": "Double",
           "unit": "C",
           "description": "motor bearing temperature",
-          "mock_value": 82.5,
           "warn_max": 80,
           "alarm_max": 95
         },
         {
           "name": "current",
-          "node_id": "ns=2;s=Pump1.Current",
+          "node_id": "ns=1;s=Pump1.Current",
           "data_type": "Double",
           "unit": "A",
           "description": "motor phase current",
-          "mock_value": 14.2,
           "warn_max": 16,
           "alarm_max": 20
         },
         {
           "name": "running",
-          "node_id": "ns=2;s=Pump1.Running",
+          "node_id": "ns=1;s=Pump1.Running",
           "data_type": "Boolean",
           "unit": "",
-          "description": "running feedback",
-          "mock_value": true
+          "description": "running feedback"
+        },
+        {
+          "name": "label",
+          "node_id": "ns=1;s=Pump1.Label",
+          "data_type": "String",
+          "unit": "",
+          "description": "simulated equipment label"
         }
       ]
     }

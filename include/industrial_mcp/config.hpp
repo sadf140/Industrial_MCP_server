@@ -11,7 +11,7 @@ namespace industrial_mcp {
 
 struct ServerConfig {
     std::string name = "industrial-mcp-server";
-    std::string version = "0.3.0-p1";
+    std::string version = "0.4.0-p2";
     bool read_only = true;
 };
 

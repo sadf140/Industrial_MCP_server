@@ -27,18 +27,23 @@ std::string temp_file_path(const std::string& name) {
     return (std::filesystem::temp_directory_path() / name).string();
 }
 
-Json load_first_json_line(const std::string& path) {
+Json load_last_json_line(const std::string& path) {
     std::ifstream input(path);
     std::string line;
-    std::getline(input, line);
-    return Json::parse(line);
+    std::string last_line;
+    while (std::getline(input, line)) {
+        if (!line.empty()) {
+            last_line = line;
+        }
+    }
+    return Json::parse(last_line);
 }
 
 AppConfig make_mock_config(const std::string& audit_path = {}, const std::string& alarm_path = {}) {
     const auto config_json = Json::parse(R"({
         "server": {
             "name": "industrial-mcp-server",
-            "version": "0.3.0-p1",
+            "version": "0.4.0-p2",
             "read_only": true
         },
         "opcua": {
@@ -107,6 +112,22 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(!tools.empty());
     assert(tools.at(0).contains("inputSchema"));
     assert(tools.at(0).contains("outputSchema"));
+    assert(tools.at(0).at("name").get<std::string>() == "get_gateway_health");
+
+    const auto health = server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":30,
+        "method":"tools/call",
+        "params":{"name":"get_gateway_health","arguments":{}}
+    })"));
+    assert(health.has_value());
+    const auto& health_content = health->at("result").at("structuredContent");
+    assert(health_content.at("ok").get<bool>());
+    assert(health_content.at("read_only").get<bool>());
+    assert(health_content.at("server").at("version").get<std::string>() == "0.4.0-p2");
+    assert(health_content.at("configuration").at("device_count").get<int>() == 1);
+    assert(health_content.at("configuration").at("variable_count").get<int>() == 2);
+    assert(health_content.at("uptime_ms").get<long long>() >= 0);
 
     const auto read = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -121,7 +142,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(read_result.at("structuredContent").at("value").get<double>() == 82.5);
     assert(read_result.at("structuredContent").at("attempts").get<int>() == 1);
 
-    const auto audit = load_first_json_line(audit_path);
+    const auto audit = load_last_json_line(audit_path);
     assert(audit.at("event").get<std::string>() == "tool_call");
     assert(audit.at("tool").get<std::string>() == "read_opcua_node");
     assert(audit.at("device_id").get<std::string>() == "pump-1");

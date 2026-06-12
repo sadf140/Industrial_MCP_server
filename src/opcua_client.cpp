@@ -83,6 +83,7 @@ Json variant_to_json(const opcua::Variant& value, std::string& data_type, std::s
 
 opcua::Client make_client(const OpcUaRuntimeConfig& runtime) {
     opcua::Client client;
+    client.config().setLogger([](auto&&...) {});
     const auto timeout = runtime.read_timeout_ms > 0 ? runtime.read_timeout_ms : runtime.connect_timeout_ms;
     client.config().setTimeout(static_cast<uint32_t>(timeout > 0 ? timeout : 3000));
     return client;

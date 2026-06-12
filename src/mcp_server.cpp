@@ -49,6 +49,14 @@ Json tool_error(const std::string& code, const std::string& message) {
     return tool_result({{"error", code}, {"message", message}}, true);
 }
 
+bool opcua_compiled() {
+#ifdef INDUSTRIAL_MCP_WITH_OPCUA
+    return true;
+#else
+    return false;
+#endif
+}
+
 std::string required_arg_string(const Json& args, const std::string& key) {
     if (!args.is_object() || !args.contains(key) || !args.at(key).is_string()) {
         throw std::runtime_error("missing required string argument: " + key);
@@ -194,7 +202,11 @@ std::string tool_error_code(const Json& result) {
 } // namespace
 
 McpServer::McpServer(AppConfig config)
-    : config_(std::move(config)), alarms_(config_.alarm_log_path), audit_(config_.audit.log_path) {}
+    : config_(std::move(config)),
+      alarms_(config_.alarm_log_path),
+      audit_(config_.audit.log_path),
+      started_at_(std::chrono::steady_clock::now()),
+      started_at_utc_(now_utc_iso8601()) {}
 
 void McpServer::run(std::istream& input, std::ostream& output) {
     std::string line;
@@ -287,6 +299,7 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
 
 Json McpServer::list_tools() const {
     Json tools = Json::array();
+    tools.push_back(tool("get_gateway_health", "Return read-only gateway health, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
     tools.push_back(tool("read_opcua_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
     tools.push_back(tool("read_device_snapshot", "Read all configured variables for a device.", device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_device_status", "Return read-only device and OPC UA session status.", device_id_input_schema(), generic_output_schema()));
@@ -301,6 +314,10 @@ Json McpServer::call_tool(const Json& params) {
     const Json args = params.contains("arguments") ? params.at("arguments") : Json::object();
 
     try {
+        if (name == "get_gateway_health") {
+            return tool_result(gateway_health());
+        }
+
         if (name == "get_device_status") {
             const auto device_id = required_arg_string(args, "device_id");
             const auto* device = find_device(config_, device_id);
@@ -382,6 +399,60 @@ Json McpServer::call_tool(const Json& params) {
     } catch (const std::exception& ex) {
         return tool_error("TOOL_EXECUTION_FAILED", ex.what());
     }
+}
+
+Json McpServer::gateway_health() const {
+    std::size_t variable_count = 0;
+    int mock_devices = 0;
+    int opcua_devices = 0;
+    Json devices = Json::array();
+
+    for (const auto& device : config_.devices) {
+        variable_count += device.variables.size();
+        const bool mock = device.endpoint.rfind("mock://", 0) == 0;
+        if (mock) {
+            ++mock_devices;
+        } else {
+            ++opcua_devices;
+        }
+        devices.push_back({
+            {"id", device.id},
+            {"name", device.name},
+            {"endpoint_type", mock ? "mock" : "opcua"},
+            {"variable_count", static_cast<int>(device.variables.size())},
+        });
+    }
+
+    const auto uptime_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started_at_
+    ).count();
+
+    return {
+        {"ok", true},
+        {"timestamp", now_utc_iso8601()},
+        {"started_at", started_at_utc_},
+        {"uptime_ms", uptime_ms},
+        {"server", {{"name", config_.server.name}, {"version", config_.server.version}, {"read_only", config_.server.read_only}}},
+        {"mcp", {{"transport", "stdio"}, {"protocol_version", kProtocolVersion}}},
+        {"opcua", {
+            {"compiled", opcua_compiled()},
+            {"connect_timeout_ms", config_.opcua.connect_timeout_ms},
+            {"read_timeout_ms", config_.opcua.read_timeout_ms},
+            {"retry_count", config_.opcua.retry_count},
+            {"retry_delay_ms", config_.opcua.retry_delay_ms},
+            {"allow_raw_node_id", config_.opcua.allow_raw_node_id},
+        }},
+        {"audit", {{"enabled", !config_.audit.log_path.empty()}, {"log_path_configured", !config_.audit.log_path.empty()}}},
+        {"alarms", {{"log_path_configured", !config_.alarm_log_path.empty()}}},
+        {"configuration", {
+            {"device_count", static_cast<int>(config_.devices.size())},
+            {"variable_count", static_cast<int>(variable_count)},
+            {"mock_device_count", mock_devices},
+            {"opcua_device_count", opcua_devices},
+            {"devices", devices},
+        }},
+        {"read_only", true},
+    };
 }
 
 } // namespace industrial_mcp
