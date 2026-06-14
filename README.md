@@ -12,8 +12,14 @@ C++20 工业 MCP Server，用于让 Codex / VS Code 等 MCP 客户端通过 JSON
 - `write_node`：写入指定设备的配置白名单 OPC UA 节点值，默认关闭，必须显式开启。
 - `list_devices`：列出当前配置接入的工业设备和变量。
 - `get_alarm_history`：查询报警历史。
-- `diagnose_fault`：基于设备状态、变量采样、报警日志和网络状态生成故障诊断上下文。
+- `diagnose_fault`：基于设备状态缓存、报警日志和网络状态生成故障诊断上下文。
 - `get_network_status`：返回设备通信状态、延迟、断连次数和连续失败次数。
+
+第二阶段新增工业可用增强：
+
+- `get_device_state`：读取 MCP Server 内部周期采集的设备状态缓存，不在本次工具调用中直接访问 OPC UA。
+- 自动阈值报警：缓存采集时根据 `warn_min/warn_max` 与 `alarm_min/alarm_max` 追加 `WARN` / `CRITICAL` 报警；通信或读取失败追加 `ERROR` 报警。
+- `diagnose_fault`：优先使用设备状态缓存、报警历史和通信上下文，输出适合 LLM 分析的结构化现场上下文。
 
 为了兼容前期联调，以下旧工具名仍保留：
 
@@ -98,6 +104,10 @@ MCP Server 使用 stdio，一行一个 JSON-RPC 请求。
 {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_network_status","arguments":{"device_id":"pump-1"}}}
 ```
 
+```json
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_device_state","arguments":{"device_id":"pump-1"}}}
+```
+
 ## open62541 模拟设备
 
 构建 `INDUSTRIAL_MCP_WITH_OPCUA=ON` 时会生成独立模拟设备程序。
@@ -158,6 +168,9 @@ config/config.opcua-sim.json
 - `opcua.retry_delay_ms`：重试间隔。
 - `opcua.allow_raw_node_id`：是否允许 `read_node` 读取显式 `node_id`。
 - `opcua.write_enabled`：是否启用 OPC UA 写入。
+- `cache.enabled`：是否启用后台周期采集和设备状态缓存。
+- `cache.poll_interval_ms`：后台采集周期，默认 `2000`。
+- `cache.stale_after_ms`：缓存超过该时长未更新后标记为 stale，默认 `10000`。
 - `audit.log_path`：工具调用审计 JSONL 路径，留空关闭审计。
 - `alarm_log_path`：报警 JSONL 文件路径。
 - `devices[].endpoint`：支持 `mock://...` 和 `opc.tcp://...`。
@@ -178,4 +191,5 @@ config/config.opcua-sim.json
 - OPC UA 写入仅支持常见标量类型：Boolean、Double、Float、Int32、UInt32、Int16、UInt16、String。
 - 不支持数组、结构体、证书、安全策略、用户名密码认证和 OPC UA 方法调用。
 - 网络状态统计为进程内状态，服务重启后清零。
+- 设备状态缓存和自动报警状态为进程内状态，服务重启后重新采集和判定。
 - 故障诊断仍是规则式辅助诊断，不能替代现场安全规程。

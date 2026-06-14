@@ -12,6 +12,11 @@
     "allow_raw_node_id": false,
     "write_enabled": false
   },
+  "cache": {
+    "enabled": true,
+    "poll_interval_ms": 2000,
+    "stale_after_ms": 10000
+  },
   "audit": {
     "log_path": "../data/audit.example.jsonl"
   },

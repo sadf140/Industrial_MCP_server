@@ -1,6 +1,5 @@
 #include "industrial_mcp/diagnostics.hpp"
 
-#include <sstream>
 #include <vector>
 
 namespace industrial_mcp {
@@ -11,10 +10,6 @@ std::string arg_string(const Json& args, const std::string& key) {
         return args.at(key).get<std::string>();
     }
     return {};
-}
-
-bool is_numeric_json(const Json& value) {
-    return value.is_number();
 }
 
 Json cause(const std::string& code,
@@ -33,11 +28,60 @@ Json cause(const std::string& code,
     return out;
 }
 
+Json variable_context(const DeviceState& state, const DeviceConfig& device, Json& possible_causes) {
+    Json threshold_context = Json::array();
+    for (const auto& [name, cached] : state.variables) {
+        const auto* variable = find_variable(device, name);
+        if (variable == nullptr || !cached.ok || !cached.value.is_number()) continue;
+        const double value = cached.value.get<double>();
+
+        Json item = Json::object();
+        item["name"] = name;
+        item["node_id"] = cached.node_id;
+        item["value"] = value;
+        item["unit"] = cached.unit;
+        item["status"] = "normal";
+        if (variable->warn_min) item["warn_min"] = *variable->warn_min;
+        if (variable->warn_max) item["warn_max"] = *variable->warn_max;
+        if (variable->alarm_min) item["alarm_min"] = *variable->alarm_min;
+        if (variable->alarm_max) item["alarm_max"] = *variable->alarm_max;
+
+        if (variable->alarm_max && value > *variable->alarm_max) {
+            item["status"] = "critical_high";
+            possible_causes.push_back(cause("VARIABLE_ABOVE_ALARM_MAX",
+                                            name + " is above alarm_max",
+                                            item,
+                                            "inspect process load, sensor calibration, cooling/lubrication condition, and related interlocks",
+                                            0.78));
+        } else if (variable->alarm_min && value < *variable->alarm_min) {
+            item["status"] = "critical_low";
+            possible_causes.push_back(cause("VARIABLE_BELOW_ALARM_MIN",
+                                            name + " is below alarm_min",
+                                            item,
+                                            "inspect supply condition, sensor wiring, actuator state, and upstream process constraints",
+                                            0.78));
+        } else if ((variable->warn_max && value > *variable->warn_max) ||
+                   (variable->warn_min && value < *variable->warn_min)) {
+            item["status"] = "warning";
+            possible_causes.push_back(cause("VARIABLE_OUTSIDE_WARNING_RANGE",
+                                            name + " is outside warning range",
+                                            item,
+                                            "continue monitoring trend and compare with recent alarms before taking corrective action",
+                                            0.55));
+        }
+
+        if (item.at("status").get<std::string>() != "normal") {
+            threshold_context.push_back(item);
+        }
+    }
+    return threshold_context;
+}
+
 } // namespace
 
 Json DiagnosticsEngine::diagnose(const AppConfig& config,
-                                 OpcUaClient& opcua,
                                  const AlarmStore& alarms,
+                                 const DeviceStateCache& state_cache,
                                  const Json& arguments) {
     const auto device_id = arg_string(arguments, "device_id");
     const auto symptom = arg_string(arguments, "symptom");
@@ -48,6 +92,7 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
     Json limitations = Json::array();
     Json evidence = Json::array();
     Json possible_causes = Json::array();
+    Json recommended_focus = Json::array();
 
     const auto* device = find_device(config, device_id);
     if (device == nullptr) {
@@ -61,81 +106,40 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
         return result;
     }
 
-    const auto status = opcua.get_status(*device, config.opcua);
-    Json status_evidence = Json::object();
-    status_evidence["type"] = "device_status";
-    status_evidence["online"] = status.online;
-    status_evidence["session_state"] = status.session_state;
-    status_evidence["error"] = status.error;
-    status_evidence["latency_ms"] = status.latency_ms;
-    status_evidence["disconnect_count"] = status.disconnect_count;
-    status_evidence["consecutive_failures"] = status.consecutive_failures;
-    status_evidence["last_success_at"] = status.last_success_at;
-    status_evidence["last_error_at"] = status.last_error_at;
-    evidence.push_back(status_evidence);
+    const auto cached_state = state_cache.state_for(device_id);
+    Json device_state_json = state_cache.state_json(device_id);
+    Json device_state = device_state_json.contains("device") ? device_state_json.at("device") : Json(nullptr);
+    Json network_context = Json::object();
+    network_context["source"] = "device_state_cache";
+    network_context["cache_enabled"] = state_cache.enabled();
+    network_context["online"] = cached_state ? cached_state->online : false;
+    network_context["stale"] = cached_state ? cached_state->stale : true;
+    network_context["status"] = cached_state ? (cached_state->stale ? "STALE" : cached_state->status) : "NO_CACHED_STATE";
+    network_context["last_error"] = cached_state ? cached_state->last_error : "no cached state collected yet";
+    network_context["last_update_time"] = cached_state ? cached_state->last_update_time : "";
+    evidence.push_back({{"type", "device_state_cache"}, {"state", device_state}});
+    evidence.push_back({{"type", "network_context"}, {"context", network_context}});
 
-    if (!status.online) {
+    if (!state_cache.enabled()) {
+        limitations.push_back("device state cache is disabled");
+    }
+    if (!cached_state) {
+        limitations.push_back("no cached device state is available yet");
+        recommended_focus.push_back("confirm whether the cache worker has started and whether OPC UA endpoint is reachable");
+    } else if (cached_state->stale) {
+        limitations.push_back("cached device state is stale");
+        recommended_focus.push_back("distinguish process fault evidence from stale telemetry before taking action");
+    }
+
+    if (!cached_state || !cached_state->online) {
         possible_causes.push_back(cause("DEVICE_OFFLINE",
-                                        "device or OPC UA session is offline",
-                                        status_evidence,
+                                        "device communication is offline or no cached successful sample exists",
+                                        network_context,
                                         "check network reachability, endpoint URL, OPC UA server state, and security policy",
                                         0.85));
-    } else if (status.consecutive_failures > 0 || status.disconnect_count > 0) {
-        possible_causes.push_back(cause("INTERMITTENT_COMMUNICATION",
-                                        "recent OPC UA communication failures were observed",
-                                        status_evidence,
-                                        "inspect network stability, gateway logs, OPC UA server load, and switch port diagnostics",
-                                        0.58));
-    }
-
-    std::vector<const VariableConfig*> variable_refs;
-    variable_refs.reserve(device->variables.size());
-    for (const auto& [_, variable] : device->variables) {
-        variable_refs.push_back(&variable);
-    }
-    const auto reads = opcua.read_nodes(*device, variable_refs, config.opcua);
-    for (std::size_t index = 0; index < variable_refs.size(); ++index) {
-        const auto& variable = *variable_refs[index];
-        const auto& read = reads.at(index);
-        Json sample = Json::object();
-        sample["type"] = "variable_sample";
-        sample["name"] = variable.name;
-        sample["node_id"] = variable.node_id;
-        sample["ok"] = read.ok;
-        sample["value"] = read.value;
-        sample["quality"] = read.quality;
-        sample["error"] = read.error;
-        sample["attempts"] = read.attempts;
-        evidence.push_back(sample);
-
-        if (!read.ok) {
-            limitations.push_back("failed to read variable: " + variable.name);
-            continue;
-        }
-
-        if (is_numeric_json(read.value)) {
-            const double value = read.value.get<double>();
-            if (variable.alarm_max && value > *variable.alarm_max) {
-                possible_causes.push_back(cause("VARIABLE_ABOVE_ALARM_MAX",
-                                                variable.name + " is above alarm_max",
-                                                sample,
-                                                "inspect process load, sensor calibration, cooling/lubrication condition, and related interlocks",
-                                                0.78));
-            } else if (variable.alarm_min && value < *variable.alarm_min) {
-                possible_causes.push_back(cause("VARIABLE_BELOW_ALARM_MIN",
-                                                variable.name + " is below alarm_min",
-                                                sample,
-                                                "inspect supply condition, sensor wiring, actuator state, and upstream process constraints",
-                                                0.78));
-            } else if ((variable.warn_max && value > *variable.warn_max) ||
-                       (variable.warn_min && value < *variable.warn_min)) {
-                possible_causes.push_back(cause("VARIABLE_OUTSIDE_WARNING_RANGE",
-                                                variable.name + " is outside warning range",
-                                                sample,
-                                                "continue monitoring trend and compare with recent alarms before taking corrective action",
-                                                0.55));
-            }
-        }
+        recommended_focus.push_back("verify communication path before interpreting process variables");
+    } else {
+        recommended_focus.push_back("compare threshold evidence with recent alarm order and operator symptom");
     }
 
     AlarmQuery alarm_query;
@@ -144,10 +148,16 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
     alarm_query.end_time = end_time;
     alarm_query.limit = 50;
     const auto alarm_analysis = alarms.analyze_json(alarm_query);
+    const auto recent_alarms = alarms.query_json(alarm_query);
     Json alarm_evidence = Json::object();
     alarm_evidence["type"] = "alarm_analysis";
     alarm_evidence["analysis"] = alarm_analysis;
     evidence.push_back(alarm_evidence);
+
+    Json threshold_context = Json::array();
+    if (cached_state) {
+        threshold_context = variable_context(*cached_state, *device, possible_causes);
+    }
 
     if (alarm_analysis.contains("total") && alarm_analysis.at("total").get<int>() > 0) {
         possible_causes.push_back(cause("RECENT_ALARM_PATTERN",
@@ -170,11 +180,43 @@ Json DiagnosticsEngine::diagnose(const AppConfig& config,
         symptom_evidence["type"] = "operator_symptom";
         symptom_evidence["symptom"] = symptom;
         evidence.push_back(symptom_evidence);
+        recommended_focus.push_back("correlate the operator symptom with cached variables and first-out alarms");
     }
 
+    Json alarm_context = Json::object();
+    alarm_context["query"] = {
+        {"device_id", device_id},
+        {"start_time", start_time},
+        {"end_time", end_time},
+        {"limit", alarm_query.limit},
+    };
+    alarm_context["analysis"] = alarm_analysis;
+    alarm_context["recent"] = recent_alarms;
+
+    if (recommended_focus.empty()) {
+        recommended_focus.push_back("validate the cached state against field instrumentation before making maintenance decisions");
+    }
+
+    Json llm_context = Json::object();
+    llm_context["purpose"] = "Structured industrial fault diagnosis context for an LLM; C++ does not call a model directly.";
+    llm_context["device_id"] = device_id;
+    llm_context["operator_symptom"] = symptom;
+    llm_context["recommended_focus"] = recommended_focus;
+    llm_context["constraints"] = Json::array({
+        "treat cached telemetry as evidence, not proof",
+        "separate communication faults from process faults",
+        "verify recommendations against equipment manuals and site safety procedures",
+        "do not perform write operations unless maintenance mode and configuration explicitly allow it",
+    });
+
     result["summary"] = possible_causes.empty()
-        ? "no clear fault rule was triggered from available evidence"
-        : "diagnostic rules found possible causes; validate evidence before acting";
+        ? "LLM diagnostic context generated; no local rule identified a clear fault"
+        : "LLM diagnostic context generated with local rule-based possible causes";
+    result["device_state"] = device_state;
+    result["alarm_context"] = alarm_context;
+    result["threshold_context"] = threshold_context;
+    result["network_context"] = network_context;
+    result["llm_context"] = llm_context;
     result["possible_causes"] = possible_causes;
     result["evidence"] = evidence;
     result["recommended_actions"] = actions;

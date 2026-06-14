@@ -3,6 +3,7 @@
 #include "industrial_mcp/alarm_store.hpp"
 #include "industrial_mcp/audit_logger.hpp"
 #include "industrial_mcp/config.hpp"
+#include "industrial_mcp/device_state_cache.hpp"
 #include "industrial_mcp/diagnostics.hpp"
 #include "industrial_mcp/opcua_client.hpp"
 
@@ -16,6 +17,7 @@ namespace industrial_mcp {
 class McpServer {
 public:
     explicit McpServer(AppConfig config);
+    ~McpServer();
 
     void run(std::istream& input, std::ostream& output);
     std::optional<Json> handle_message(const Json& request);
@@ -25,6 +27,7 @@ private:
     OpcUaClient opcua_;
     AlarmStore alarms_;
     AuditLogger audit_;
+    DeviceStateCache state_cache_;
     DiagnosticsEngine diagnostics_;
     std::chrono::steady_clock::time_point started_at_;
     std::string started_at_utc_;

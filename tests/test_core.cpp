@@ -63,6 +63,11 @@ AppConfig make_mock_config(const std::string& audit_path = {}, const std::string
             "retry_delay_ms": 1,
             "write_enabled": false
         },
+        "cache": {
+            "enabled": false,
+            "poll_interval_ms": 2000,
+            "stale_after_ms": 10000
+        },
         "audit": {
             "log_path": ""
         },
@@ -131,6 +136,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(has_tool(tools, "get_alarm_history"));
     assert(has_tool(tools, "diagnose_fault"));
     assert(has_tool(tools, "get_network_status"));
+    assert(has_tool(tools, "get_device_state"));
 
     const auto health = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -146,6 +152,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(health_content.at("configuration").at("device_count").get<int>() == 1);
     assert(health_content.at("configuration").at("variable_count").get<int>() == 2);
     assert(health_content.at("uptime_ms").get<long long>() >= 0);
+    assert(!health_content.at("cache").at("enabled").get<bool>());
 
     const auto read = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -244,13 +251,12 @@ void test_mcp_lifecycle_tools_and_audit() {
     })"));
     assert(diag.has_value());
     assert(diag->at("result").contains("structuredContent"));
-    bool has_status_evidence = false;
-    for (const auto& item : diag->at("result").at("structuredContent").at("evidence")) {
-        if (item.contains("type") && item.at("type").get<std::string>() == "device_status") {
-            has_status_evidence = item.contains("latency_ms") && item.contains("disconnect_count");
-        }
-    }
-    assert(has_status_evidence);
+    const auto& diag_content = diag->at("result").at("structuredContent");
+    assert(diag_content.contains("device_state"));
+    assert(diag_content.contains("alarm_context"));
+    assert(diag_content.contains("network_context"));
+    assert(diag_content.contains("llm_context"));
+    assert(diag_content.at("network_context").at("cache_enabled").get<bool>() == false);
 
     std::remove(audit_path.c_str());
 }
@@ -297,6 +303,88 @@ void test_alarm_store_quality_and_ordering() {
     const auto& history_content = history->at("result").at("structuredContent");
     assert(history_content.at("count").get<int>() == 2);
     assert(history_content.at("alarms").at(0).at("severity").get<std::string>() == "warning");
+
+    AlarmRecord appended;
+    appended.timestamp = "2026-06-11T09:10:00Z";
+    appended.device_id = "pump-1";
+    appended.level = "WARN";
+    appended.code = "CURRENT_HIGH";
+    appended.message = "current above warning threshold";
+    appended.source_node = "ns=2;s=Pump1.Current";
+    appended.value = 17.2;
+    appended.threshold = 16.0;
+    assert(store.append(appended));
+
+    AlarmQuery level_query;
+    level_query.device_id = "pump-1";
+    level_query.level = "WARN";
+    level_query.limit = 1;
+    const auto by_level = store.query_json(level_query);
+    assert(by_level.at("count").get<int>() == 1);
+    assert(by_level.at("alarms").at(0).at("level").get<std::string>() == "WARN");
+    assert(by_level.at("alarms").at(0).at("source_node").get<std::string>() == "ns=2;s=Pump1.Current");
+    assert(by_level.at("alarms").at(0).at("value").get<double>() == 17.2);
+    assert(by_level.at("alarms").at(0).at("threshold").get<double>() == 16.0);
+
+    std::remove(alarm_path.c_str());
+}
+
+void test_device_state_cache_and_auto_alarm() {
+    const auto alarm_path = temp_file_path("industrial_mcp_cache_alarm_test.jsonl");
+    std::remove(alarm_path.c_str());
+
+    {
+        auto config = make_mock_config({}, alarm_path);
+        config.cache.enabled = true;
+        config.cache.poll_interval_ms = 50;
+        config.cache.stale_after_ms = 5000;
+
+        McpServer server(config);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        const auto state = server.handle_message(Json::parse(R"({
+            "jsonrpc":"2.0",
+            "id":70,
+            "method":"tools/call",
+            "params":{"name":"get_device_state","arguments":{"device_id":"pump-1"}}
+        })"));
+        assert(state.has_value());
+        const auto& state_content = state->at("result").at("structuredContent");
+        assert(state_content.at("count").get<int>() == 1);
+        const auto& device_state = state_content.at("device");
+        assert(device_state.at("device_id").get<std::string>() == "pump-1");
+        assert(device_state.at("online").get<bool>());
+        assert(device_state.at("temperature").get<double>() == 82.5);
+        assert(device_state.at("running").get<bool>());
+        assert(device_state.at("variables").contains("temperature"));
+
+        const auto history = server.handle_message(Json::parse(R"({
+            "jsonrpc":"2.0",
+            "id":71,
+            "method":"tools/call",
+            "params":{"name":"get_alarm_history","arguments":{"device_id":"pump-1","level":"WARN","keyword":"temperature","limit":5}}
+        })"));
+        assert(history.has_value());
+        const auto& history_content = history->at("result").at("structuredContent");
+        assert(history_content.at("count").get<int>() >= 1);
+        assert(history_content.at("alarms").at(0).at("level").get<std::string>() == "WARN");
+        assert(history_content.at("alarms").at(0).at("source_node").get<std::string>() == "ns=2;s=Pump1.Temperature");
+
+        const auto diag = server.handle_message(Json::parse(R"({
+            "jsonrpc":"2.0",
+            "id":72,
+            "method":"tools/call",
+            "params":{"name":"diagnose_fault","arguments":{"device_id":"pump-1","symptom":"temperature rising"}}
+        })"));
+        assert(diag.has_value());
+        const auto& diag_content = diag->at("result").at("structuredContent");
+        assert(diag_content.contains("device_state"));
+        assert(diag_content.contains("alarm_context"));
+        assert(diag_content.contains("network_context"));
+        assert(diag_content.contains("llm_context"));
+        assert(diag_content.at("threshold_context").size() >= 1);
+        assert(diag_content.at("network_context").at("online").get<bool>());
+    }
 
     std::remove(alarm_path.c_str());
 }
@@ -441,6 +529,7 @@ void test_opcua_integration() {
 int main() {
     test_mcp_lifecycle_tools_and_audit();
     test_alarm_store_quality_and_ordering();
+    test_device_state_cache_and_auto_alarm();
     test_write_node_policy_and_audit();
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
     test_opcua_integration();

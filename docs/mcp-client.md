@@ -140,6 +140,10 @@ get_network_status，device_id=pump-1
 ```
 
 ```text
+get_device_state，device_id=pump-1
+```
+
+```text
 diagnose_fault，device_id=pump-1
 ```
 
@@ -169,6 +173,14 @@ Server 从 stdin 接收一行一个 JSON-RPC 请求。
 
 ```json
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_network_status","arguments":{"device_id":"pump-1"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_device_state","arguments":{"device_id":"pump-1"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_alarm_history","arguments":{"device_id":"pump-1","level":"WARN","limit":10}}}
 ```
 
 协议响应只写入 stdout。运行日志写入 stderr，避免污染 MCP stdio 传输。

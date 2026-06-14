@@ -30,7 +30,53 @@
 - `last_error`
 - `attempts`
 
-这些统计为进程内状态，服务重启后清零。当前版本不引入后台轮询，统计由读取、快照、状态查询、写入和网络状态查询按需刷新。
+这些统计为进程内状态，服务重启后清零。第二阶段引入了设备状态缓存后台采集，读取、快照、状态查询、写入、网络状态查询和缓存采集都会刷新通信状态。
+
+## 设备状态缓存
+
+配置中默认启用缓存：
+
+```json
+{
+  "cache": {
+    "enabled": true,
+    "poll_interval_ms": 2000,
+    "stale_after_ms": 10000
+  }
+}
+```
+
+后台采集线程按 `poll_interval_ms` 周期读取已配置变量，并维护 `DeviceStateCache`。MCP 工具 `get_device_state` 只读取缓存，不会在本次工具调用中直接访问 OPC UA：
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_device_state","arguments":{"device_id":"pump-1"}}}
+```
+
+返回字段包括：
+
+- `temperature`
+- `current`
+- `voltage`
+- `running`
+- `status`
+- `last_update_time`
+- `stale`
+- `last_error`
+- `variables`
+
+如果缓存超过 `stale_after_ms` 未更新，设备状态会标记为 `stale=true`。
+
+## 自动报警
+
+后台采集会根据变量阈值追加报警 JSONL：
+
+- 超过 `warn_min` / `warn_max`：记录 `WARN`。
+- 超过 `alarm_min` / `alarm_max`：记录 `CRITICAL`。
+- OPC UA 读取失败或设备离线：记录 `ERROR`。
+
+报警字段包含 `alarm_id`、`device_id`、`level`、`message`、`source_node`、`value`、`threshold` 和 `timestamp`。`level` 是主字段，`severity` 继续兼容旧查询和旧日志。
+
+同一设备、同一变量、同一等级的报警不会在每轮采集中重复追加；恢复正常后，下次再次越界会重新触发。
 
 ## 写入控制
 

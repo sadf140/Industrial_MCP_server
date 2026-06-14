@@ -220,6 +220,7 @@ Json alarm_query_input_schema() {
         {"device_id", schema_string("Optional configured device id.")},
         {"start_time", schema_string("Inclusive ISO-8601 UTC start time.")},
         {"end_time", schema_string("Inclusive ISO-8601 UTC end time.")},
+        {"level", schema_string("Optional level filter. Compatible with severity.")},
         {"severity", schema_string("Optional severity filter.")},
         {"keyword", schema_string("Optional case-insensitive keyword.")},
         {"limit", schema_integer("Maximum records to return.", 1)},
@@ -283,8 +284,15 @@ McpServer::McpServer(AppConfig config)
     : config_(std::move(config)),
       alarms_(config_.alarm_log_path),
       audit_(config_.audit.log_path),
+      state_cache_(config_, opcua_, alarms_),
       started_at_(std::chrono::steady_clock::now()),
-      started_at_utc_(now_utc_iso8601()) {}
+      started_at_utc_(now_utc_iso8601()) {
+    state_cache_.start();
+}
+
+McpServer::~McpServer() {
+    state_cache_.stop();
+}
 
 void McpServer::run(std::istream& input, std::ostream& output) {
     std::string line;
@@ -384,6 +392,7 @@ Json McpServer::list_tools() const {
     tools.push_back(tool("write_node", "Write one whitelisted configured OPC UA variable. Disabled unless server and config explicitly allow writes.", write_node_input_schema(), generic_output_schema(), false));
     tools.push_back(tool("list_devices", "List configured industrial devices and their OPC UA variables without opening network sessions.", object_schema(Json::object()), generic_output_schema()));
     tools.push_back(tool("read_device_snapshot", "Read all configured variables for a device.", device_id_input_schema(), generic_output_schema()));
+    tools.push_back(tool("get_device_state", "Return cached device state collected by the gateway without directly reading OPC UA for this call.", optional_device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_device_status", "Return read-only device and OPC UA session status.", device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_network_status", "Return per-device OPC UA communication status, latency, and disconnect counters.", optional_device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_alarm_history", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
@@ -450,6 +459,10 @@ Json McpServer::call_tool(const Json& params) {
                 {"devices", devices},
                 {"read_only", true},
             });
+        }
+
+        if (name == "get_device_state") {
+            return tool_result(state_cache_.state_json(optional_arg_string(args, "device_id")));
         }
 
         if (name == "read_node" || name == "read_opcua_node") {
@@ -547,6 +560,7 @@ Json McpServer::call_tool(const Json& params) {
             query.device_id = optional_arg_string(args, "device_id");
             query.start_time = optional_arg_string(args, "start_time");
             query.end_time = optional_arg_string(args, "end_time");
+            query.level = optional_arg_string(args, "level");
             query.severity = optional_arg_string(args, "severity");
             query.keyword = optional_arg_string(args, "keyword");
             query.limit = optional_arg_limit(args, 100);
@@ -554,7 +568,7 @@ Json McpServer::call_tool(const Json& params) {
         }
 
         if (name == "diagnose_fault") {
-            return tool_result(diagnostics_.diagnose(config_, opcua_, alarms_, args));
+            return tool_result(diagnostics_.diagnose(config_, alarms_, state_cache_, args));
         }
 
         return tool_error("UNKNOWN_TOOL", "unknown tool: " + name);
@@ -607,6 +621,11 @@ Json McpServer::gateway_health() const {
         }},
         {"audit", {{"enabled", !config_.audit.log_path.empty()}, {"log_path_configured", !config_.audit.log_path.empty()}}},
         {"alarms", {{"log_path_configured", !config_.alarm_log_path.empty()}}},
+        {"cache", {
+            {"enabled", config_.cache.enabled},
+            {"poll_interval_ms", config_.cache.poll_interval_ms},
+            {"stale_after_ms", config_.cache.stale_after_ms},
+        }},
         {"configuration", {
             {"device_count", static_cast<int>(config_.devices.size())},
             {"variable_count", static_cast<int>(variable_count)},

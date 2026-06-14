@@ -5,6 +5,7 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <utility>
 
 namespace industrial_mcp {
 namespace {
@@ -18,6 +19,13 @@ std::string optional_string(const Json& object, const std::string& key) {
 
 bool optional_bool(const Json& object, const std::string& key) {
     return object.is_object() && object.contains(key) && object.at(key).is_boolean() && object.at(key).get<bool>();
+}
+
+std::optional<double> optional_double(const Json& object, const std::string& key) {
+    if (object.is_object() && object.contains(key) && object.at(key).is_number()) {
+        return object.at(key).get<double>();
+    }
+    return std::nullopt;
 }
 
 bool valid_iso8601_utc_prefix(const std::string& value) {
@@ -43,11 +51,16 @@ bool contains_case_insensitive(const std::string& haystack, const std::string& n
     return lower_copy(haystack).find(lower_copy(needle)) != std::string::npos;
 }
 
+std::string canonical_level(const AlarmRecord& alarm) {
+    return alarm.level.empty() ? alarm.severity : alarm.level;
+}
+
 } // namespace
 
 AlarmStore::AlarmStore(std::string path) : path_(std::move(path)) {}
 
 std::vector<AlarmRecord> AlarmStore::load_all(std::size_t* invalid_count) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<AlarmRecord> alarms;
     if (invalid_count != nullptr) *invalid_count = 0;
     if (path_.empty()) return alarms;
@@ -61,11 +74,18 @@ std::vector<AlarmRecord> AlarmStore::load_all(std::size_t* invalid_count) const 
         try {
             const auto json = Json::parse(line);
             AlarmRecord alarm;
+            alarm.alarm_id = optional_string(json, "alarm_id");
             alarm.timestamp = optional_string(json, "timestamp");
             alarm.device_id = optional_string(json, "device_id");
+            alarm.level = optional_string(json, "level");
             alarm.severity = optional_string(json, "severity");
+            if (alarm.level.empty()) alarm.level = alarm.severity;
+            if (alarm.severity.empty()) alarm.severity = alarm.level;
             alarm.code = optional_string(json, "code");
             alarm.message = optional_string(json, "message");
+            alarm.source_node = optional_string(json, "source_node");
+            alarm.value = optional_double(json, "value");
+            alarm.threshold = optional_double(json, "threshold");
             alarm.state = optional_string(json, "state");
             alarm.source = optional_string(json, "source");
             alarm.acknowledged = optional_bool(json, "acknowledged");
@@ -87,15 +107,34 @@ std::vector<AlarmRecord> AlarmStore::load_all(std::size_t* invalid_count) const 
     return alarms;
 }
 
+bool AlarmStore::append(AlarmRecord alarm) const {
+    if (path_.empty()) return false;
+    if (alarm.timestamp.empty()) alarm.timestamp = now_utc_iso8601();
+    if (alarm.level.empty()) alarm.level = alarm.severity;
+    if (alarm.severity.empty()) alarm.severity = alarm.level;
+    if (alarm.source.empty()) alarm.source = "device_state_cache";
+    if (alarm.state.empty()) alarm.state = "active";
+    if (alarm.alarm_id.empty()) {
+        alarm.alarm_id = alarm.device_id + ":" + alarm.code + ":" + alarm.timestamp;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ofstream output(path_, std::ios::app);
+    if (!output) return false;
+    output << alarm_to_json(alarm).dump() << '\n';
+    return static_cast<bool>(output);
+}
+
 std::vector<AlarmRecord> AlarmStore::query(const AlarmQuery& query) const {
     auto alarms = load_all();
     std::vector<AlarmRecord> result;
+    const auto level_filter = query.level.empty() ? query.severity : query.level;
     for (auto it = alarms.rbegin(); it != alarms.rend(); ++it) {
         const auto& alarm = *it;
         if (!query.device_id.empty() && alarm.device_id != query.device_id) continue;
-        if (!query.severity.empty() && alarm.severity != query.severity) continue;
+        if (!level_filter.empty() && lower_copy(canonical_level(alarm)) != lower_copy(level_filter)) continue;
         if (!in_range(alarm.timestamp, query.start_time, query.end_time)) continue;
-        if (!contains_case_insensitive(alarm.message + " " + alarm.code, query.keyword)) continue;
+        if (!contains_case_insensitive(alarm.message + " " + alarm.code + " " + alarm.source_node, query.keyword)) continue;
         result.push_back(alarm);
         if (result.size() >= query.limit) break;
     }
@@ -129,7 +168,7 @@ Json AlarmStore::analyze_json(const AlarmQuery& query) const {
     std::map<std::string, int> by_severity;
     for (const auto& alarm : alarms) {
         by_code[alarm.code]++;
-        by_severity[alarm.severity]++;
+        by_severity[canonical_level(alarm)]++;
     }
 
     Json frequent = Json::array();
@@ -156,7 +195,8 @@ Json AlarmStore::analyze_json(const AlarmQuery& query) const {
         Json item = Json::object();
         item["timestamp"] = alarm.timestamp;
         item["code"] = alarm.code;
-        item["severity"] = alarm.severity;
+        item["level"] = canonical_level(alarm);
+        item["severity"] = canonical_level(alarm);
         timeline.push_back(item);
     }
 
@@ -175,12 +215,18 @@ Json AlarmStore::analyze_json(const AlarmQuery& query) const {
 }
 
 Json alarm_to_json(const AlarmRecord& alarm) {
+    const auto level = canonical_level(alarm);
     Json out = Json::object();
+    out["alarm_id"] = alarm.alarm_id;
     out["timestamp"] = alarm.timestamp;
     out["device_id"] = alarm.device_id;
-    out["severity"] = alarm.severity;
+    out["level"] = level;
+    out["severity"] = level;
     out["code"] = alarm.code;
     out["message"] = alarm.message;
+    out["source_node"] = alarm.source_node;
+    if (alarm.value) out["value"] = *alarm.value;
+    if (alarm.threshold) out["threshold"] = *alarm.threshold;
     out["state"] = alarm.state;
     out["source"] = alarm.source;
     out["acknowledged"] = alarm.acknowledged;

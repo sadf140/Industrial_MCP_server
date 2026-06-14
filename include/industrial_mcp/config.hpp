@@ -28,6 +28,12 @@ struct AuditConfig {
     std::string log_path;
 };
 
+struct CacheConfig {
+    bool enabled = true;
+    int poll_interval_ms = 2000;
+    int stale_after_ms = 10000;
+};
+
 struct VariableConfig {
     std::string name;
     std::string node_id;
@@ -52,6 +58,7 @@ struct DeviceConfig {
 struct AppConfig {
     ServerConfig server;
     OpcUaRuntimeConfig opcua;
+    CacheConfig cache;
     AuditConfig audit;
     std::string alarm_log_path;
     std::vector<DeviceConfig> devices;

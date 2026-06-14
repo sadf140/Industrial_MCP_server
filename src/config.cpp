@@ -91,6 +91,13 @@ AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir)
         config.opcua.write_enabled = optional_bool(opcua, "write_enabled", config.opcua.write_enabled);
     }
 
+    if (root.contains("cache") && root.at("cache").is_object()) {
+        const auto& cache = root.at("cache");
+        config.cache.enabled = optional_bool(cache, "enabled", config.cache.enabled);
+        config.cache.poll_interval_ms = optional_int(cache, "poll_interval_ms", config.cache.poll_interval_ms);
+        config.cache.stale_after_ms = optional_int(cache, "stale_after_ms", config.cache.stale_after_ms);
+    }
+
     if (root.contains("audit") && root.at("audit").is_object()) {
         const auto& audit = root.at("audit");
         config.audit.log_path = resolve_path(base_dir, optional_string(audit, "log_path", config.audit.log_path));

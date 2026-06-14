@@ -41,6 +41,7 @@ add_library(industrial_mcp_core
     src/audit_logger.cpp
     src/alarm_store.cpp
     src/config.cpp
+    src/device_state_cache.cpp
     src/diagnostics.cpp
     src/json.cpp
     src/mcp_server.cpp
