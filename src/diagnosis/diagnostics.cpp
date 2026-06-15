@@ -1,4 +1,4 @@
-#include "industrial_mcp/diagnostics.hpp"
+#include "industrial_mcp/diagnosis/diagnostics.hpp"
 
 #include <vector>
 

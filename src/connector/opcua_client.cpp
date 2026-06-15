@@ -1,4 +1,4 @@
-#include "industrial_mcp/opcua_client.hpp"
+#include "industrial_mcp/connector/opcua_client.hpp"
 
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
 #include <open62541pp/client.hpp>

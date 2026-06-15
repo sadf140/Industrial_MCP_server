@@ -1,4 +1,4 @@
-#include "industrial_mcp/alarm_store.hpp"
+#include "industrial_mcp/alarm/alarm_store.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -57,22 +57,21 @@ std::string canonical_level(const AlarmRecord& alarm) {
 
 } // namespace
 
-AlarmStore::AlarmStore(std::string path) : path_(std::move(path)) {}
+AlarmStore::AlarmStore(std::string path)
+    : path_(std::move(path)), backend_(make_storage_backend(storage_, path_, {})) {}
+
+AlarmStore::AlarmStore(std::string path, StorageConfig storage, std::string audit_path)
+    : path_(std::move(path)),
+      storage_(std::move(storage)),
+      backend_(make_storage_backend(storage_, path_, std::move(audit_path))) {}
 
 std::vector<AlarmRecord> AlarmStore::load_all(std::size_t* invalid_count) const {
-    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<AlarmRecord> alarms;
     if (invalid_count != nullptr) *invalid_count = 0;
-    if (path_.empty()) return alarms;
 
-    std::ifstream input(path_);
-    if (!input) return alarms;
-
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.empty()) continue;
+    const auto records = backend_->load_alarm_json(invalid_count);
+    for (const auto& json : records) {
         try {
-            const auto json = Json::parse(line);
             AlarmRecord alarm;
             alarm.alarm_id = optional_string(json, "alarm_id");
             alarm.timestamp = optional_string(json, "timestamp");
@@ -119,10 +118,7 @@ bool AlarmStore::append(AlarmRecord alarm) const {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    std::ofstream output(path_, std::ios::app);
-    if (!output) return false;
-    output << alarm_to_json(alarm).dump() << '\n';
-    return static_cast<bool>(output);
+    return backend_->append_alarm_json(alarm_to_json(alarm));
 }
 
 bool AlarmStore::acknowledge(const std::string& alarm_id,

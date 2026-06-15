@@ -1,6 +1,6 @@
-#include "industrial_mcp/audit_logger.hpp"
+#include "industrial_mcp/observability/audit_logger.hpp"
 
-#include "industrial_mcp/json.hpp"
+#include "industrial_mcp/mcp/json.hpp"
 
 #include <fstream>
 #include <utility>
@@ -20,7 +20,13 @@ Json sanitized_arguments(const Json& arguments) {
 
 } // namespace
 
-AuditLogger::AuditLogger(std::string path) : path_(std::move(path)) {}
+AuditLogger::AuditLogger(std::string path)
+    : path_(std::move(path)), backend_(make_storage_backend(storage_, {}, path_)) {}
+
+AuditLogger::AuditLogger(std::string path, StorageConfig storage, std::string alarm_path)
+    : path_(std::move(path)),
+      storage_(std::move(storage)),
+      backend_(make_storage_backend(storage_, std::move(alarm_path), path_)) {}
 
 void AuditLogger::record(const AuditRecord& record) {
     if (path_.empty()) {
@@ -48,10 +54,7 @@ void AuditLogger::record(const AuditRecord& record) {
     if (!record.error_code.empty()) event["error_code"] = record.error_code;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    std::ofstream output(path_, std::ios::app);
-    if (output) {
-        output << event.dump() << '\n';
-    }
+    backend_->append_audit_json(event);
 }
 
 void AuditLogger::record_tool_call(const std::string& tool_name,

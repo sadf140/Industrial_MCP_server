@@ -1,7 +1,10 @@
-#include "industrial_mcp/alarm_store.hpp"
-#include "industrial_mcp/config.hpp"
-#include "industrial_mcp/mcp_server.hpp"
-#include "industrial_mcp/opcua_client.hpp"
+#include "industrial_mcp/alarm/alarm_store.hpp"
+#include "industrial_mcp/mcp/config.hpp"
+#include "industrial_mcp/reliability/device_connection_manager.hpp"
+#include "industrial_mcp/mcp/mcp_server.hpp"
+#include "industrial_mcp/connector/opcua_client.hpp"
+#include "industrial_mcp/observability/observability.hpp"
+#include "industrial_mcp/storage/storage_backend.hpp"
 
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
 #include <open62541pp/node.hpp>
@@ -54,6 +57,10 @@ AppConfig make_mock_config(const std::string& audit_path = {}, const std::string
             "name": "industrial-mcp-server",
             "version": "0.5.0-p3",
             "read_only": true
+        },
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0
         },
         "opcua": {
             "allow_raw_node_id": false,
@@ -161,6 +168,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(health_content.at("configuration").at("variable_count").get<int>() == 2);
     assert(health_content.at("uptime_ms").get<long long>() >= 0);
     assert(!health_content.at("cache").at("enabled").get<bool>());
+    assert(health_content.at("reliability").at("circuit_failure_threshold").get<int>() == 3);
 
     const auto read = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -337,6 +345,106 @@ void test_alarm_store_quality_and_ordering() {
     std::remove(alarm_path.c_str());
 }
 
+void test_observability_metrics_and_health() {
+    ObservabilityMetrics metrics;
+    metrics.record_tool_call("read_node", true, 25);
+    metrics.record_tool_call("read_node", false, 75);
+    metrics.record_alarm_event();
+
+    const auto snapshot = metrics.snapshot_json();
+    assert(snapshot.at("mcp_requests_total").get<unsigned long long>() == 2);
+    assert(snapshot.at("mcp_tool_errors_total").get<unsigned long long>() == 1);
+    assert(snapshot.at("alarm_events_total").get<unsigned long long>() == 1);
+
+    Json devices = Json::array({{
+        {"device_id", "pump-1"},
+        {"online", true},
+        {"reconnect_count", 2},
+    }});
+    Json cache = {
+        {"devices", Json::array({{
+            {"device_id", "pump-1"},
+            {"cache_age_seconds", 3},
+        }})},
+    };
+    const auto prometheus = metrics.prometheus_text(devices, cache);
+    assert(prometheus.find("mcp_requests_total 2") != std::string::npos);
+    assert(prometheus.find("mcp_request_duration_seconds_count 2") != std::string::npos);
+    assert(prometheus.find("mcp_tool_errors_total") != std::string::npos);
+    assert(prometheus.find("opcua_connection_state") != std::string::npos);
+    assert(prometheus.find("device_cache_age_seconds") != std::string::npos);
+
+    auto config = make_mock_config();
+    config.observability.metrics_enabled = true;
+    config.observability.metrics_port = 0;
+    McpServer server(config);
+    assert(server.health_live().at("ok").get<bool>());
+    assert(server.health_ready().at("ok").get<bool>());
+    assert(server.health_devices().at("devices").is_array());
+
+    const auto read = server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":90,
+        "method":"tools/call",
+        "params":{"name":"read_node","arguments":{"device_id":"pump-1","variable":"temperature"}}
+    })"));
+    assert(read.has_value());
+    const auto server_metrics = server.metrics_text();
+    assert(server_metrics.find("mcp_requests_total 1") != std::string::npos);
+    assert(server_metrics.find("alarm_events_total") != std::string::npos);
+}
+
+void test_storage_backend_jsonl_and_optional_sqlite() {
+    const auto alarm_path = temp_file_path("industrial_mcp_storage_alarm_test.jsonl");
+    const auto audit_path = temp_file_path("industrial_mcp_storage_audit_test.jsonl");
+    const auto sqlite_path = temp_file_path("industrial_mcp_storage_test.sqlite");
+    std::remove(alarm_path.c_str());
+    std::remove(audit_path.c_str());
+    std::remove(sqlite_path.c_str());
+
+    StorageConfig storage;
+    storage.type = "jsonl";
+    AlarmStore jsonl_store(alarm_path, storage, audit_path);
+    AlarmRecord alarm;
+    alarm.timestamp = "2026-06-11T10:00:00Z";
+    alarm.device_id = "pump-1";
+    alarm.level = "WARN";
+    alarm.code = "TEMP_WARN";
+    alarm.message = "temperature warning";
+    assert(jsonl_store.append(alarm));
+    AlarmQuery query;
+    query.device_id = "pump-1";
+    query.limit = 5;
+    assert(jsonl_store.query(query).size() == 1);
+
+    StorageConfig sqlite_storage;
+    sqlite_storage.type = "sqlite";
+    sqlite_storage.sqlite_path = sqlite_path;
+    AlarmStore sqlite_store(alarm_path, sqlite_storage, audit_path);
+    AlarmRecord sqlite_alarm;
+    sqlite_alarm.timestamp = "2026-06-11T10:05:00Z";
+    sqlite_alarm.device_id = "pump-2";
+    sqlite_alarm.level = "ERROR";
+    sqlite_alarm.code = "CURRENT_HIGH";
+    sqlite_alarm.message = "current high";
+    assert(sqlite_store.append(sqlite_alarm));
+    AlarmQuery sqlite_query;
+    sqlite_query.device_id = "pump-2";
+    sqlite_query.limit = 5;
+    assert(sqlite_store.query(sqlite_query).size() == 1);
+
+    AuditLogger audit(audit_path, sqlite_storage, alarm_path);
+    AuditRecord audit_record;
+    audit_record.tool_name = "read_node";
+    audit_record.device_id = "pump-1";
+    audit_record.result = "ok";
+    audit.record(audit_record);
+
+    std::remove(alarm_path.c_str());
+    std::remove(audit_path.c_str());
+    std::remove(sqlite_path.c_str());
+}
+
 void test_device_state_cache_and_auto_alarm() {
     const auto alarm_path = temp_file_path("industrial_mcp_cache_alarm_test.jsonl");
     std::remove(alarm_path.c_str());
@@ -362,6 +470,7 @@ void test_device_state_cache_and_auto_alarm() {
         const auto& device_state = state_content.at("device");
         assert(device_state.at("device_id").get<std::string>() == "pump-1");
         assert(device_state.at("online").get<bool>());
+        assert(device_state.at("connection_state").get<std::string>() == "Connected");
         assert(device_state.at("temperature").get<double>() == 82.5);
         assert(device_state.at("running").get<bool>());
         assert(device_state.at("variables").contains("temperature"));
@@ -397,6 +506,157 @@ void test_device_state_cache_and_auto_alarm() {
     std::remove(alarm_path.c_str());
 }
 
+void test_device_connection_manager_reliability() {
+    auto config = make_mock_config();
+    config.reliability.max_retry_count = 0;
+    config.reliability.circuit_failure_threshold = 2;
+    config.reliability.backoff_initial_ms = 1;
+
+    DeviceConfig disabled;
+    disabled.id = "pump-disabled";
+    disabled.name = "Disabled Pump";
+    disabled.protocol = "opcua";
+    disabled.enabled = false;
+    disabled.endpoint = "mock://pump-disabled";
+    const auto* configured_pump = find_device(config, "pump-1");
+    assert(configured_pump != nullptr);
+    disabled.variables = configured_pump->variables;
+    config.devices.push_back(disabled);
+
+    DeviceConnectionManager manager(config);
+
+    const auto* pump = find_device(config, "pump-1");
+    assert(pump != nullptr);
+    const auto* temperature = find_variable(*pump, "temperature");
+    assert(temperature != nullptr);
+
+    const auto initial = manager.snapshot(*pump);
+    assert(to_string(initial.connection_state) == "Disconnected");
+    assert(!initial.online);
+
+    const auto read = manager.read_node(*pump, temperature, temperature->node_id, config.opcua);
+    assert(read.ok);
+    const auto connected = manager.snapshot(*pump);
+    assert(connected.online);
+    assert(to_string(connected.connection_state) == "Connected");
+    assert(to_string(connected.circuit_state) == "Closed");
+
+    const auto* disabled_device = find_device(config, "pump-disabled");
+    assert(disabled_device != nullptr);
+    const auto disabled_read = manager.read_node(*disabled_device, temperature, temperature->node_id, config.opcua);
+    assert(!disabled_read.ok);
+    const auto disabled_health = manager.snapshot(*disabled_device);
+    assert(to_string(disabled_health.connection_state) == "Disabled");
+
+    const auto bad_read_1 = manager.read_node(*pump, nullptr, "ns=2;s=Unknown", config.opcua);
+    assert(!bad_read_1.ok);
+    const auto after_one_failure = manager.snapshot(*pump);
+    assert(!after_one_failure.online);
+    assert(after_one_failure.consecutive_failures == 1);
+    assert(to_string(after_one_failure.connection_state) == "Reconnecting");
+
+    const auto bad_read_2 = manager.read_node(*pump, nullptr, "ns=2;s=Unknown", config.opcua);
+    assert(!bad_read_2.ok);
+    const auto faulted = manager.snapshot(*pump);
+    assert(!faulted.online);
+    assert(faulted.consecutive_failures == 2);
+    assert(to_string(faulted.connection_state) == "Faulted");
+    assert(to_string(faulted.circuit_state) == "Open");
+
+    const auto circuit_blocked = manager.read_node(*pump, temperature, temperature->node_id, config.opcua);
+    assert(!circuit_blocked.ok);
+    assert(circuit_blocked.status_code == "CircuitOpen");
+}
+
+void test_device_connection_manager_multi_device_isolation() {
+    auto config = make_mock_config();
+    config.reliability.max_retry_count = 0;
+    config.reliability.circuit_failure_threshold = 1;
+    config.reliability.circuit_cooldown_ms = 0;
+
+    const auto* pump_1 = find_device(config, "pump-1");
+    assert(pump_1 != nullptr);
+    DeviceConfig pump_2 = *pump_1;
+    pump_2.id = "pump-2";
+    pump_2.name = "Pump 2";
+    pump_2.endpoint = "mock://pump-2";
+    pump_2.variables.at("temperature").mock_value = 61.0;
+    config.devices.push_back(pump_2);
+
+    DeviceConnectionManager manager(config);
+    const auto* first = find_device(config, "pump-1");
+    const auto* second = find_device(config, "pump-2");
+    assert(first != nullptr);
+    assert(second != nullptr);
+    const auto* first_temperature = find_variable(*first, "temperature");
+    const auto* second_temperature = find_variable(*second, "temperature");
+    assert(first_temperature != nullptr);
+    assert(second_temperature != nullptr);
+
+    const auto first_bad = manager.read_node(*first, nullptr, "ns=2;s=Unknown", config.opcua);
+    assert(!first_bad.ok);
+    const auto first_faulted = manager.snapshot(*first);
+    assert(to_string(first_faulted.connection_state) == "Faulted");
+    assert(to_string(first_faulted.circuit_state) == "Open");
+
+    const auto second_read = manager.read_node(*second, second_temperature, second_temperature->node_id, config.opcua);
+    assert(second_read.ok);
+    assert(second_read.value.get<double>() == 61.0);
+    const auto second_connected = manager.snapshot(*second);
+    assert(to_string(second_connected.connection_state) == "Connected");
+    assert(to_string(second_connected.circuit_state) == "Closed");
+
+    const auto recovered = manager.read_node(*first, first_temperature, first_temperature->node_id, config.opcua);
+    assert(recovered.ok);
+    const auto first_recovered = manager.snapshot(*first);
+    assert(to_string(first_recovered.connection_state) == "Connected");
+    assert(to_string(first_recovered.circuit_state) == "Closed");
+}
+
+void test_device_state_cache_single_device_refresh() {
+    const auto alarm_path = temp_file_path("industrial_mcp_single_refresh_alarm_test.jsonl");
+    std::remove(alarm_path.c_str());
+
+    auto config = make_mock_config({}, alarm_path);
+    config.cache.enabled = true;
+    const auto* pump_1 = find_device(config, "pump-1");
+    assert(pump_1 != nullptr);
+    DeviceConfig pump_2 = *pump_1;
+    pump_2.id = "pump-2";
+    pump_2.name = "Pump 2";
+    pump_2.endpoint = "mock://pump-2";
+    pump_2.variables.at("temperature").mock_value = 66.0;
+    config.devices.push_back(pump_2);
+
+    AlarmStore alarms(alarm_path);
+    DeviceConnectionManager manager(config);
+    DeviceStateCache cache(config, manager, alarms);
+
+    assert(cache.refresh_device("pump-1"));
+    assert(!cache.refresh_device("missing-device"));
+
+    const auto all = cache.state_json();
+    assert(all.at("count").get<int>() == 2);
+    bool saw_refreshed = false;
+    bool saw_pending = false;
+    for (const auto& device : all.at("devices")) {
+        if (device.at("device_id").get<std::string>() == "pump-1") {
+            saw_refreshed = true;
+            assert(device.at("online").get<bool>());
+            assert(device.at("connection_state").get<std::string>() == "Connected");
+        }
+        if (device.at("device_id").get<std::string>() == "pump-2") {
+            saw_pending = true;
+            assert(device.at("stale").get<bool>());
+            assert(device.at("status").get<std::string>() == "INITIALIZING");
+        }
+    }
+    assert(saw_refreshed);
+    assert(saw_pending);
+
+    std::remove(alarm_path.c_str());
+}
+
 void test_stage3_security_health_and_operations() {
     const auto alarm_path = temp_file_path("industrial_mcp_stage3_alarm_test.jsonl");
     std::remove(alarm_path.c_str());
@@ -424,6 +684,8 @@ void test_stage3_security_health_and_operations() {
     })"));
     assert(device_health.has_value());
     assert(device_health->at("result").at("structuredContent").at("device_id").get<std::string>() == "pump-1");
+    assert(device_health->at("result").at("structuredContent").at("connection").at("connection_state").get<std::string>() == "Connected");
+    assert(device_health->at("result").at("structuredContent").at("connection").at("circuit_state").get<std::string>() == "Closed");
 
     const auto denied_refresh = viewer_server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -438,6 +700,16 @@ void test_stage3_security_health_and_operations() {
     auto operator_config = make_mock_config({}, alarm_path);
     operator_config.security.default_role = "operator";
     McpServer operator_server(operator_config);
+
+    const auto missing_refresh = operator_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":86,
+        "method":"tools/call",
+        "params":{"name":"refresh_device_state","arguments":{"device_id":"missing-device"}}
+    })"));
+    assert(missing_refresh.has_value());
+    assert(missing_refresh->at("result").at("isError").get<bool>());
+    assert(missing_refresh->at("result").at("structuredContent").at("error").get<std::string>() == "DEVICE_NOT_FOUND");
 
     const auto ack = operator_server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -616,7 +888,12 @@ void test_opcua_integration() {
 int main() {
     test_mcp_lifecycle_tools_and_audit();
     test_alarm_store_quality_and_ordering();
+    test_observability_metrics_and_health();
+    test_storage_backend_jsonl_and_optional_sqlite();
     test_device_state_cache_and_auto_alarm();
+    test_device_connection_manager_reliability();
+    test_device_connection_manager_multi_device_isolation();
+    test_device_state_cache_single_device_refresh();
     test_stage3_security_health_and_operations();
     test_write_node_policy_and_audit();
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA

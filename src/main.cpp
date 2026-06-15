@@ -1,6 +1,6 @@
-#include "industrial_mcp/config.hpp"
-#include "industrial_mcp/json.hpp"
-#include "industrial_mcp/mcp_server.hpp"
+#include "industrial_mcp/mcp/config.hpp"
+#include "industrial_mcp/mcp/json.hpp"
+#include "industrial_mcp/mcp/mcp_server.hpp"
 
 #include <exception>
 #include <iostream>

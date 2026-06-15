@@ -1,4 +1,6 @@
-#include "industrial_mcp/mcp_server.hpp"
+#include "industrial_mcp/mcp/mcp_server.hpp"
+
+#include "industrial_mcp/storage/storage_backend.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -455,7 +457,10 @@ std::string data_source_for_tool(const std::string& tool_name) {
     if (tool_name == "get_device_state" || tool_name == "diagnose_fault") return "cache";
     if (tool_name == "list_devices" || tool_name == "get_gateway_health" || tool_name == "get_server_health") return "configuration";
     if (tool_name == "get_alarm_history" || tool_name == "query_alarm_logs" || tool_name == "analyze_alarms" || tool_name == "acknowledge_alarm") return "alarm_store";
-    if (tool_name == "read_node" || tool_name == "read_opcua_node" || tool_name == "read_device_snapshot" || tool_name == "write_node" || tool_name == "get_device_status" || tool_name == "get_network_status") return "opcua";
+    if (tool_name == "read_node" || tool_name == "read_opcua_node" || tool_name == "read_device_snapshot" || tool_name == "write_node" ||
+        tool_name == "get_device_status" || tool_name == "get_device_health" || tool_name == "get_network_status" || tool_name == "refresh_device_state") {
+        return "connection_manager";
+    }
     return "server";
 }
 
@@ -485,15 +490,27 @@ std::string validate_write_constraints(const VariableConfig& variable, const Jso
 
 McpServer::McpServer(AppConfig config)
     : config_(std::move(config)),
-      alarms_(config_.alarm_log_path),
-      audit_(config_.audit.log_path),
-      state_cache_(config_, opcua_, alarms_),
+      connections_(config_),
+      alarms_(config_.alarm_log_path, config_.storage, config_.audit.log_path),
+      audit_(config_.audit.log_path, config_.storage, config_.alarm_log_path),
+      state_cache_(config_, connections_, alarms_),
       started_at_(std::chrono::steady_clock::now()),
       started_at_utc_(now_utc_iso8601()) {
     state_cache_.start();
+    health_http_.start(config_.http.host, config_.http.port, [this](const std::string& path) {
+        return handle_http_request(path);
+    });
+    if (config_.observability.metrics_enabled && config_.observability.metrics_port > 0 &&
+        config_.observability.metrics_port != config_.http.port) {
+        metrics_http_.start(config_.http.host, config_.observability.metrics_port, [this](const std::string& path) {
+            return handle_http_request(path);
+        });
+    }
 }
 
 McpServer::~McpServer() {
+    metrics_http_.stop();
+    health_http_.stop();
     state_cache_.stop();
 }
 
@@ -585,6 +602,21 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
             audit_record.read_only = tool_call_read_only(tool_name);
             if (args.is_object() && args.contains("value")) audit_record.new_value = args.at("value");
             audit_.record(audit_record);
+            const bool ok = tool_result_ok(result);
+            metrics_.record_tool_call(tool_name, ok, elapsed);
+            if (tool_name == "acknowledge_alarm" && ok) {
+                metrics_.record_alarm_event();
+            }
+            emit_structured_log(ok ? "info" : "warn", "tool_call", {
+                {"request_id", audit_record.request_id},
+                {"user_id", audit_record.user_id},
+                {"client_id", audit_record.client_id},
+                {"tool_name", audit_record.tool_name},
+                {"device_id", audit_record.device_id},
+                {"duration_ms", audit_record.elapsed_ms},
+                {"result", audit_record.result},
+                {"error_code", audit_record.error_code},
+            });
             return make_response(id, result);
         }
 
@@ -645,8 +677,7 @@ Json McpServer::call_tool(const Json& params) {
             const auto device_id = required_arg_string(args, "device_id");
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
-            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
-            return tool_result(status_to_json(opcua_.get_status(*device, config_.opcua)));
+            return tool_result(device_connection_health_to_json(connections_.get_health(*device, config_.opcua)));
         }
 
         if (name == "list_devices") {
@@ -661,6 +692,7 @@ Json McpServer::call_tool(const Json& params) {
                     {"name", device.name},
                     {"protocol", device.protocol},
                     {"enabled", device.enabled},
+                    {"connection", connections_.health_json(device)},
                     {"endpoint", device.endpoint},
                     {"endpoint_type", device.endpoint.rfind("mock://", 0) == 0 ? "mock" : "opcua"},
                     {"variable_count", static_cast<int>(device.variables.size())},
@@ -680,11 +712,10 @@ Json McpServer::call_tool(const Json& params) {
             if (!device_id.empty()) {
                 const auto* device = find_device(config_, device_id);
                 if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
-                if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
-                devices.push_back(status_to_json(opcua_.get_status(*device, config_.opcua)));
+                devices.push_back(device_connection_health_to_json(connections_.get_health(*device, config_.opcua)));
             } else {
                 for (const auto& device : config_.devices) {
-                    devices.push_back(status_to_json(opcua_.get_status(device, config_.opcua)));
+                    devices.push_back(device_connection_health_to_json(connections_.get_health(device, config_.opcua)));
                 }
             }
             return tool_result({
@@ -700,8 +731,15 @@ Json McpServer::call_tool(const Json& params) {
         }
 
         if (name == "refresh_device_state") {
+            const auto device_id = optional_arg_string(args, "device_id");
+            if (!device_id.empty()) {
+                const auto* device = find_device(config_, device_id);
+                if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+                state_cache_.refresh_device(device_id);
+                return tool_result(state_cache_.state_json(device_id));
+            }
             state_cache_.refresh_once();
-            return tool_result(state_cache_.state_json(optional_arg_string(args, "device_id")));
+            return tool_result(state_cache_.state_json());
         }
 
         if (name == "acknowledge_alarm") {
@@ -824,7 +862,7 @@ Json McpServer::call_tool(const Json& params) {
                 return tool_error("INVALID_ARGUMENT", "read_node requires variable or node_id");
             }
 
-            return tool_result(read_result_to_json(opcua_.read_node(*device, variable, node_id, config_.opcua), device_id, node_id, variable));
+            return tool_result(read_result_to_json(connections_.read_node(*device, variable, node_id, config_.opcua), device_id, node_id, variable));
         }
 
         if (name == "write_node") {
@@ -853,7 +891,7 @@ Json McpServer::call_tool(const Json& params) {
                 return tool_error("INVALID_ARGUMENT", constraint_error);
             }
 
-            const auto write = opcua_.write_node(*device, *variable, args.at("value"), config_.opcua);
+            const auto write = connections_.write_node(*device, *variable, args.at("value"), config_.opcua);
             auto payload = write_result_to_json(write, device_id, *variable);
             if (!write.ok) {
                 if (!payload.contains("error_code") || !payload.at("error_code").is_string() || payload.at("error_code").get<std::string>().empty()) {
@@ -880,7 +918,7 @@ Json McpServer::call_tool(const Json& params) {
                 variable_refs.push_back(&variable);
             }
 
-            const auto reads = opcua_.read_nodes(*device, variable_refs, config_.opcua);
+            const auto reads = connections_.read_nodes(*device, variable_refs, config_.opcua);
             for (std::size_t index = 0; index < variable_refs.size(); ++index) {
                 const auto* variable = variable_refs[index];
                 const auto& read = reads.at(index);
@@ -981,6 +1019,13 @@ Json McpServer::gateway_health() const {
             {"tool_execution_ms", config_.timeouts.tool_execution_ms},
             {"opcua_request_ms", config_.timeouts.opcua_request_ms},
         }},
+        {"reliability", {
+            {"max_retry_count", config_.reliability.max_retry_count},
+            {"backoff_initial_ms", config_.reliability.backoff_initial_ms},
+            {"backoff_max_ms", config_.reliability.backoff_max_ms},
+            {"circuit_failure_threshold", config_.reliability.circuit_failure_threshold},
+            {"circuit_cooldown_ms", config_.reliability.circuit_cooldown_ms},
+        }},
         {"observability", {
             {"metrics_enabled", config_.observability.metrics_enabled},
             {"metrics_port", config_.observability.metrics_port},
@@ -1014,20 +1059,84 @@ Json McpServer::device_health(const std::string& device_id) {
     out["timestamp"] = now_utc_iso8601();
     out["read_only"] = true;
 
-    if (!device->enabled) {
-        out["ok"] = false;
-        out["status"] = "disabled";
-        out["connection"] = Json::object();
-        out["cache"] = state_cache_.state_json(device_id);
-        return out;
-    }
-
-    const auto status = opcua_.get_status(*device, config_.opcua);
-    out["ok"] = status.online;
-    out["status"] = status.online ? "healthy" : "degraded";
-    out["connection"] = status_to_json(status);
+    const auto connection = connections_.get_health(*device, config_.opcua);
+    out["ok"] = connection.online;
+    out["status"] = !device->enabled ? "disabled" : (connection.online ? "healthy" : "degraded");
+    out["connection"] = device_connection_health_to_json(connection);
     out["cache"] = state_cache_.state_json(device_id);
     return out;
+}
+
+Json McpServer::health_live() const {
+    return {
+        {"ok", true},
+        {"status", "live"},
+        {"timestamp", now_utc_iso8601()},
+        {"server", {{"name", config_.server.name}, {"version", config_.server.version}}},
+    };
+}
+
+Json McpServer::health_devices() const {
+    return {
+        {"ok", true},
+        {"timestamp", now_utc_iso8601()},
+        {"devices", connections_.all_health_json()},
+        {"cache", state_cache_.state_json()},
+    };
+}
+
+Json McpServer::health_ready() const {
+    const bool ready = !config_.devices.empty();
+    const auto uptime_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started_at_
+    ).count();
+    return {
+        {"ok", ready},
+        {"status", ready ? "ready" : "not_ready"},
+        {"timestamp", now_utc_iso8601()},
+        {"started_at", started_at_utc_},
+        {"uptime_ms", uptime_ms},
+        {"device_count", static_cast<int>(config_.devices.size())},
+        {"cache", {
+            {"enabled", config_.cache.enabled},
+            {"state", state_cache_.state_json()},
+        }},
+        {"devices", connections_.all_health_json()},
+        {"storage", {
+            {"type", config_.storage.type},
+            {"sqlite_compiled", sqlite_storage_compiled()},
+            {"sqlite_path_configured", !config_.storage.sqlite_path.empty()},
+        }},
+        {"observability", {
+            {"metrics_enabled", config_.observability.metrics_enabled},
+            {"metrics_port", config_.observability.metrics_port},
+            {"health_port", config_.http.port},
+        }},
+    };
+}
+
+std::string McpServer::metrics_text() const {
+    return metrics_.prometheus_text(connections_.all_health_json(), state_cache_.state_json());
+}
+
+HttpResponse McpServer::handle_http_request(const std::string& path) const {
+    if (path == "/health/live") {
+        return {200, "application/json", health_live().dump()};
+    }
+    if (path == "/health/ready") {
+        const auto ready = health_ready();
+        return {ready.at("ok").get<bool>() ? 200 : 503, "application/json", ready.dump()};
+    }
+    if (path == "/health/devices") {
+        return {200, "application/json", health_devices().dump()};
+    }
+    if (path == "/metrics") {
+        if (!config_.observability.metrics_enabled) {
+            return {404, "text/plain; version=0.0.4", "metrics disabled\n"};
+        }
+        return {200, "text/plain; version=0.0.4", metrics_text()};
+    }
+    return {404, "application/json", Json({{"error", "NOT_FOUND"}, {"path", path}}).dump()};
 }
 
 } // namespace industrial_mcp

@@ -1,4 +1,4 @@
-#include "industrial_mcp/config.hpp"
+#include "industrial_mcp/mcp/config.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -201,6 +201,15 @@ AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir)
         config.timeouts.mcp_request_ms = optional_int(timeouts, "mcp_request_ms", config.timeouts.mcp_request_ms);
         config.timeouts.tool_execution_ms = optional_int(timeouts, "tool_execution_ms", config.timeouts.tool_execution_ms);
         config.timeouts.opcua_request_ms = optional_int(timeouts, "opcua_request_ms", config.timeouts.opcua_request_ms);
+    }
+
+    if (root.contains("reliability") && root.at("reliability").is_object()) {
+        const auto& reliability = root.at("reliability");
+        config.reliability.max_retry_count = optional_int(reliability, "max_retry_count", config.reliability.max_retry_count);
+        config.reliability.backoff_initial_ms = optional_int(reliability, "backoff_initial_ms", config.reliability.backoff_initial_ms);
+        config.reliability.backoff_max_ms = optional_int(reliability, "backoff_max_ms", config.reliability.backoff_max_ms);
+        config.reliability.circuit_failure_threshold = optional_int(reliability, "circuit_failure_threshold", config.reliability.circuit_failure_threshold);
+        config.reliability.circuit_cooldown_ms = optional_int(reliability, "circuit_cooldown_ms", config.reliability.circuit_cooldown_ms);
     }
 
     if (root.contains("observability") && root.at("observability").is_object()) {

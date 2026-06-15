@@ -1,4 +1,4 @@
-#include "industrial_mcp/device_state_cache.hpp"
+#include "industrial_mcp/device/device_state_cache.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -42,8 +42,8 @@ std::string threshold_message(const std::string& variable, const std::string& di
 
 } // namespace
 
-DeviceStateCache::DeviceStateCache(const AppConfig& config, OpcUaClient& opcua, const AlarmStore& alarms)
-    : config_(config), opcua_(opcua), alarms_(alarms) {}
+DeviceStateCache::DeviceStateCache(const AppConfig& config, DeviceConnectionManager& connections, const AlarmStore& alarms)
+    : config_(config), connections_(connections), alarms_(alarms) {}
 
 DeviceStateCache::~DeviceStateCache() {
     stop();
@@ -93,160 +93,175 @@ void DeviceStateCache::refresh_once() {
     if (!config_.cache.enabled) return;
 
     for (const auto& device : config_.devices) {
-        std::vector<const VariableConfig*> variable_refs;
-        variable_refs.reserve(device.variables.size());
-        for (const auto& [_, variable] : device.variables) {
-            variable_refs.push_back(&variable);
+        refresh_configured_device(device);
+    }
+}
+
+bool DeviceStateCache::refresh_device(const std::string& device_id) {
+    if (!config_.cache.enabled) return false;
+    const auto* device = find_device(config_, device_id);
+    if (device == nullptr) return false;
+    refresh_configured_device(*device);
+    return true;
+}
+
+void DeviceStateCache::refresh_configured_device(const DeviceConfig& device) {
+    std::vector<const VariableConfig*> variable_refs;
+    variable_refs.reserve(device.variables.size());
+    for (const auto& [_, variable] : device.variables) {
+        variable_refs.push_back(&variable);
+    }
+
+    const auto reads = connections_.read_nodes(device, variable_refs, config_.opcua);
+    const auto connection = connections_.snapshot(device);
+    DeviceState state;
+    state.device_id = device.id;
+    state.last_update_time = now_utc_iso8601();
+    state.updated_at = std::chrono::steady_clock::now();
+
+    bool any_ok = false;
+    bool all_ok = !reads.empty();
+    std::string first_error;
+    for (std::size_t index = 0; index < variable_refs.size(); ++index) {
+        const auto* variable = variable_refs[index];
+        const auto& read = reads.at(index);
+        if (variable == nullptr) continue;
+
+        CachedVariableState cached;
+        cached.name = variable->name;
+        cached.node_id = variable->node_id;
+        cached.data_type = read.data_type.empty() ? variable->data_type : read.data_type;
+        cached.unit = variable->unit;
+        cached.description = variable->description;
+        cached.value = read.value;
+        cached.ok = read.ok;
+        cached.quality = read.quality;
+        cached.status_code = read.status_code;
+        cached.error = read.error;
+        cached.timestamp = read.timestamp.empty() ? state.last_update_time : read.timestamp;
+        state.variables[variable->name] = cached;
+
+        any_ok = any_ok || read.ok;
+        all_ok = all_ok && read.ok;
+        if (!read.ok && first_error.empty()) {
+            first_error = read.error.empty() ? read.status_code : read.error;
         }
 
-        const auto reads = opcua_.read_nodes(device, variable_refs, config_.opcua);
-        DeviceState state;
-        state.device_id = device.id;
-        state.last_update_time = now_utc_iso8601();
-        state.updated_at = std::chrono::steady_clock::now();
+        const auto variable_name = lower_copy(variable->name);
+        if (read.ok) {
+            if (variable_name == "temperature") state.temperature = numeric_value(read.value);
+            if (variable_name == "current") state.current = numeric_value(read.value);
+            if (variable_name == "voltage") state.voltage = numeric_value(read.value);
+            if (variable_name == "running" && read.value.is_boolean()) state.running = read.value.get<bool>();
+        }
+    }
 
-        bool any_ok = false;
-        bool all_ok = !reads.empty();
-        std::string first_error;
-        for (std::size_t index = 0; index < variable_refs.size(); ++index) {
-            const auto* variable = variable_refs[index];
-            const auto& read = reads.at(index);
-            if (variable == nullptr) continue;
+    state.online = any_ok;
+    state.stale = false;
+    state.connection_state = to_string(connection.connection_state);
+    state.device_connected = connection.online;
+    state.status = fixed_status(all_ok, any_ok);
+    state.last_error = first_error.empty() ? connection.last_error : first_error;
 
-            CachedVariableState cached;
-            cached.name = variable->name;
-            cached.node_id = variable->node_id;
-            cached.data_type = read.data_type.empty() ? variable->data_type : read.data_type;
-            cached.unit = variable->unit;
-            cached.description = variable->description;
-            cached.value = read.value;
-            cached.ok = read.ok;
-            cached.quality = read.quality;
-            cached.status_code = read.status_code;
-            cached.error = read.error;
-            cached.timestamp = read.timestamp.empty() ? state.last_update_time : read.timestamp;
-            state.variables[variable->name] = cached;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        states_[device.id] = state;
+    }
 
-            any_ok = any_ok || read.ok;
-            all_ok = all_ok && read.ok;
-            if (!read.ok && first_error.empty()) {
-                first_error = read.error.empty() ? read.status_code : read.error;
+    const bool all_failed = !reads.empty() && !any_ok;
+    if (all_failed) {
+        const std::string key = device.id + "|__communication";
+        const auto timestamp = now_utc_iso8601();
+        AlarmRecord alarm;
+        alarm.alarm_id = make_alarm_id(device.id, "COMMUNICATION_ERROR", timestamp);
+        alarm.timestamp = timestamp;
+        alarm.device_id = device.id;
+        alarm.level = "ERROR";
+        alarm.severity = "ERROR";
+        alarm.code = "COMMUNICATION_ERROR";
+        alarm.message = first_error.empty() ? "OPC UA communication failed for all configured variables" : first_error;
+        alarm.source = "device_state_cache";
+        alarm.source_node = device.endpoint;
+        append_alarm_if_changed(key, "ERROR:COMMUNICATION_ERROR", std::move(alarm));
+    } else {
+        clear_alarm_state(device.id + "|__communication");
+    }
+
+    for (std::size_t index = 0; index < variable_refs.size(); ++index) {
+        const auto* variable = variable_refs[index];
+        const auto& read = reads.at(index);
+        if (variable == nullptr) continue;
+
+        const std::string key = device.id + "|" + variable->name;
+        if (!read.ok) {
+            if (!all_failed) {
+                const auto timestamp = now_utc_iso8601();
+                AlarmRecord alarm;
+                alarm.alarm_id = make_alarm_id(device.id, "OPCUA_READ_FAILED", timestamp);
+                alarm.timestamp = timestamp;
+                alarm.device_id = device.id;
+                alarm.level = "ERROR";
+                alarm.severity = "ERROR";
+                alarm.code = "OPCUA_READ_FAILED";
+                alarm.message = read.error.empty() ? "OPC UA variable read failed" : read.error;
+                alarm.source = "device_state_cache";
+                alarm.source_node = variable->node_id;
+                append_alarm_if_changed(key, "ERROR:OPCUA_READ_FAILED", std::move(alarm));
             }
-
-            const auto variable_name = lower_copy(variable->name);
-            if (read.ok) {
-                if (variable_name == "temperature") state.temperature = numeric_value(read.value);
-                if (variable_name == "current") state.current = numeric_value(read.value);
-                if (variable_name == "voltage") state.voltage = numeric_value(read.value);
-                if (variable_name == "running" && read.value.is_boolean()) state.running = read.value.get<bool>();
-            }
+            continue;
         }
 
-        state.online = any_ok;
-        state.stale = false;
-        state.status = fixed_status(all_ok, any_ok);
-        state.last_error = first_error;
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            states_[device.id] = state;
+        const auto value = numeric_value(read.value);
+        if (!value) {
+            clear_alarm_state(key);
+            continue;
         }
 
-        const bool all_failed = !reads.empty() && !any_ok;
-        if (all_failed) {
-            const std::string key = device.id + "|__communication";
-            const auto timestamp = now_utc_iso8601();
-            AlarmRecord alarm;
-            alarm.alarm_id = make_alarm_id(device.id, "COMMUNICATION_ERROR", timestamp);
-            alarm.timestamp = timestamp;
-            alarm.device_id = device.id;
-            alarm.level = "ERROR";
-            alarm.severity = "ERROR";
-            alarm.code = "COMMUNICATION_ERROR";
-            alarm.message = first_error.empty() ? "OPC UA communication failed for all configured variables" : first_error;
-            alarm.source = "device_state_cache";
-            alarm.source_node = device.endpoint;
-            append_alarm_if_changed(key, "ERROR:COMMUNICATION_ERROR", std::move(alarm));
-        } else {
-            clear_alarm_state(device.id + "|__communication");
+        std::string level;
+        std::string code;
+        std::string direction;
+        std::optional<double> threshold;
+        if (variable->alarm_max && *value > *variable->alarm_max) {
+            level = "CRITICAL";
+            code = "VARIABLE_ABOVE_ALARM_MAX";
+            direction = "above alarm_max";
+            threshold = variable->alarm_max;
+        } else if (variable->alarm_min && *value < *variable->alarm_min) {
+            level = "CRITICAL";
+            code = "VARIABLE_BELOW_ALARM_MIN";
+            direction = "below alarm_min";
+            threshold = variable->alarm_min;
+        } else if (variable->warn_max && *value > *variable->warn_max) {
+            level = "WARN";
+            code = "VARIABLE_ABOVE_WARN_MAX";
+            direction = "above warn_max";
+            threshold = variable->warn_max;
+        } else if (variable->warn_min && *value < *variable->warn_min) {
+            level = "WARN";
+            code = "VARIABLE_BELOW_WARN_MIN";
+            direction = "below warn_min";
+            threshold = variable->warn_min;
         }
 
-        for (std::size_t index = 0; index < variable_refs.size(); ++index) {
-            const auto* variable = variable_refs[index];
-            const auto& read = reads.at(index);
-            if (variable == nullptr) continue;
-
-            const std::string key = device.id + "|" + variable->name;
-            if (!read.ok) {
-                if (!all_failed) {
-                    const auto timestamp = now_utc_iso8601();
-                    AlarmRecord alarm;
-                    alarm.alarm_id = make_alarm_id(device.id, "OPCUA_READ_FAILED", timestamp);
-                    alarm.timestamp = timestamp;
-                    alarm.device_id = device.id;
-                    alarm.level = "ERROR";
-                    alarm.severity = "ERROR";
-                    alarm.code = "OPCUA_READ_FAILED";
-                    alarm.message = read.error.empty() ? "OPC UA variable read failed" : read.error;
-                    alarm.source = "device_state_cache";
-                    alarm.source_node = variable->node_id;
-                    append_alarm_if_changed(key, "ERROR:OPCUA_READ_FAILED", std::move(alarm));
-                }
-                continue;
-            }
-
-            const auto value = numeric_value(read.value);
-            if (!value) {
-                clear_alarm_state(key);
-                continue;
-            }
-
-            std::string level;
-            std::string code;
-            std::string direction;
-            std::optional<double> threshold;
-            if (variable->alarm_max && *value > *variable->alarm_max) {
-                level = "CRITICAL";
-                code = "VARIABLE_ABOVE_ALARM_MAX";
-                direction = "above alarm_max";
-                threshold = variable->alarm_max;
-            } else if (variable->alarm_min && *value < *variable->alarm_min) {
-                level = "CRITICAL";
-                code = "VARIABLE_BELOW_ALARM_MIN";
-                direction = "below alarm_min";
-                threshold = variable->alarm_min;
-            } else if (variable->warn_max && *value > *variable->warn_max) {
-                level = "WARN";
-                code = "VARIABLE_ABOVE_WARN_MAX";
-                direction = "above warn_max";
-                threshold = variable->warn_max;
-            } else if (variable->warn_min && *value < *variable->warn_min) {
-                level = "WARN";
-                code = "VARIABLE_BELOW_WARN_MIN";
-                direction = "below warn_min";
-                threshold = variable->warn_min;
-            }
-
-            if (level.empty() || !threshold) {
-                clear_alarm_state(key);
-                continue;
-            }
-
-            const auto timestamp = now_utc_iso8601();
-            AlarmRecord alarm;
-            alarm.alarm_id = make_alarm_id(device.id, code, timestamp);
-            alarm.timestamp = timestamp;
-            alarm.device_id = device.id;
-            alarm.level = level;
-            alarm.severity = level;
-            alarm.code = code;
-            alarm.message = threshold_message(variable->name, direction, *value, *threshold);
-            alarm.source = "device_state_cache";
-            alarm.source_node = variable->node_id;
-            alarm.value = *value;
-            alarm.threshold = *threshold;
-            append_alarm_if_changed(key, level + ":" + code, std::move(alarm));
+        if (level.empty() || !threshold) {
+            clear_alarm_state(key);
+            continue;
         }
+
+        const auto timestamp = now_utc_iso8601();
+        AlarmRecord alarm;
+        alarm.alarm_id = make_alarm_id(device.id, code, timestamp);
+        alarm.timestamp = timestamp;
+        alarm.device_id = device.id;
+        alarm.level = level;
+        alarm.severity = level;
+        alarm.code = code;
+        alarm.message = threshold_message(variable->name, direction, *value, *threshold);
+        alarm.source = "device_state_cache";
+        alarm.source_node = variable->node_id;
+        alarm.value = *value;
+        alarm.threshold = *threshold;
+        append_alarm_if_changed(key, level + ":" + code, std::move(alarm));
     }
 }
 
@@ -292,6 +307,9 @@ Json DeviceStateCache::state_json(const std::string& device_id) const {
             pending["device_id"] = device.id;
             pending["online"] = false;
             pending["stale"] = true;
+            pending["connection_state"] = device.enabled ? "Disconnected" : "Disabled";
+            pending["device_connected"] = false;
+            pending["cache_age_seconds"] = -1;
             pending["status"] = "INITIALIZING";
             pending["last_update_time"] = "";
             pending["last_error"] = "no cached state collected yet";
@@ -336,7 +354,8 @@ Json DeviceStateCache::state_to_json_locked(const DeviceState& state) const {
     out["online"] = state.online;
     out["stale"] = is_stale_locked(state);
     out["cache_age_seconds"] = cache_age_seconds_locked(state);
-    out["device_connected"] = state.online && !is_stale_locked(state);
+    out["device_connected"] = state.device_connected && !is_stale_locked(state);
+    out["connection_state"] = state.connection_state;
     out["status"] = is_stale_locked(state) ? "STALE" : state.status;
     out["last_update_time"] = state.last_update_time;
     out["last_error"] = state.last_error;

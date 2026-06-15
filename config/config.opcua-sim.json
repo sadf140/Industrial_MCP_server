@@ -33,6 +33,13 @@
     "tool_execution_ms": 3000,
     "opcua_request_ms": 1000
   },
+  "reliability": {
+    "max_retry_count": 1,
+    "backoff_initial_ms": 100,
+    "backoff_max_ms": 30000,
+    "circuit_failure_threshold": 3,
+    "circuit_cooldown_ms": 5000
+  },
   "observability": {
     "metrics_enabled": false,
     "metrics_port": 9090

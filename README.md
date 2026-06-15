@@ -1,56 +1,87 @@
 # Industrial MCP Server
 
-C++20 工业 MCP Server，用于让 Codex / VS Code 等 MCP 客户端通过 JSON-RPC 2.0 over stdio 访问 OPC UA 工业设备数据、报警日志和诊断上下文。
+Industrial MCP Server 是一个面向工业设备诊断场景的 C++20 MCP 网关。它通过 JSON-RPC 2.0 over stdio 暴露 MCP 工具，让 Codex、VS Code 等 MCP 客户端读取 OPC UA 设备数据、查询设备状态、查看报警历史，并生成适合 LLM 分析的结构化故障诊断上下文。
 
-当前版本基于 `open62541pp` 访问 OPC UA，使用 `nlohmann/json` 处理 MCP 与 JSON-RPC 消息，CMake 构建，主要目标平台为 Linux / Ubuntu，同时保持 Windows / MinGW 可构建。
+当前实现以 Linux / Ubuntu 部署为主要目标，同时保持 Windows / MinGW 构建兼容。OPC UA 基础库使用 `open62541pp`，JSON 使用 `nlohmann/json`，构建系统使用 CMake。
 
-第三阶段开始引入生产级工程化能力：RBAC 工具权限、工具风险分级、统一请求上下文、增强审计、设备健康检查、缓存刷新、报警确认、两阶段高风险操作审批骨架，以及 Docker / systemd / Prometheus 部署资产。
+## 当前能力
 
-## 核心功能
+核心 MCP 工具：
 
-最终 MCP 主接口包括 6 个工具：
+- `read_node`：读取配置白名单中的 OPC UA 变量。
+- `write_node`：写入配置白名单变量，默认关闭，受只读开关、RBAC、变量白名单和范围约束保护。
+- `list_devices`：列出已配置设备、变量和连接状态摘要，不主动访问网络。
+- `get_alarm_history`：查询报警历史，支持 `level`，兼容旧 `severity` 参数。
+- `diagnose_fault`：基于设备状态缓存、报警历史、通信状态和阈值证据生成 LLM 诊断上下文。
+- `get_network_status`：返回设备通信状态、延迟、断连/重连次数、连续失败次数和熔断状态。
 
-- `read_node`：读取指定设备的配置白名单 OPC UA 节点值。
-- `write_node`：写入指定设备的配置白名单 OPC UA 节点值，默认关闭，必须显式开启。
-- `list_devices`：列出当前配置接入的工业设备和变量。
-- `get_alarm_history`：查询报警历史。
-- `diagnose_fault`：基于设备状态缓存、报警日志和网络状态生成故障诊断上下文。
-- `get_network_status`：返回设备通信状态、延迟、断连次数和连续失败次数。
+增强工具：
 
-第二阶段新增工业可用增强：
+- `get_device_state`：读取 MCP Server 内部周期采集缓存，不在本次工具调用中直接访问 OPC UA。
+- `get_server_health` / `get_gateway_health`：返回服务、配置、安全、缓存、存储和观测状态。
+- `get_device_health`：返回单设备连接状态、缓存状态和最近错误。
+- `refresh_device_state`：按需刷新单设备或全部设备缓存。
+- `acknowledge_alarm` / `clear_cached_alarm`：报警确认和缓存清理基础能力。
+- `prepare_device_action` / `confirm_device_action` / `cancel_device_action`：高风险操作两阶段确认骨架。
 
-- `get_device_state`：读取 MCP Server 内部周期采集的设备状态缓存，不在本次工具调用中直接访问 OPC UA。
-- 自动阈值报警：缓存采集时根据 `warn_min/warn_max` 与 `alarm_min/alarm_max` 追加 `WARN` / `CRITICAL` 报警；通信或读取失败追加 `ERROR` 报警。
-- `diagnose_fault`：优先使用设备状态缓存、报警历史和通信上下文，输出适合 LLM 分析的结构化现场上下文。
+兼容旧工具名仍保留：`read_opcua_node`、`read_device_snapshot`、`get_device_status`、`query_alarm_logs`、`analyze_alarms`。
 
-为了兼容前期联调，以下旧工具名仍保留：
+## 工程化能力
 
-- `read_opcua_node`
-- `read_device_snapshot`
-- `get_device_status`
-- `query_alarm_logs`
-- `analyze_alarms`
-- `get_gateway_health`
-- `get_server_health`
-- `get_device_health`
-- `refresh_device_state`
-- `acknowledge_alarm`
-- `clear_cached_alarm`
-- `prepare_device_action`
-- `confirm_device_action`
-- `cancel_device_action`
+- MCP 生命周期：`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`。
+- RBAC：默认 `viewer` 只读，`operator` 可执行受控低风险操作，`administrator` 可访问全部工具。
+- 多设备连接管理：每台设备独立维护 `Disabled / Disconnected / Connecting / Connected / Reconnecting / Faulted` 状态。
+- Connector 抽象：`MockConnector` 用于测试和演示，`OpcUaConnector` 包装真实 OPC UA 访问。
+- 可靠性：读操作有限重试、指数退避、熔断器 `Closed / Open / HalfOpen`。
+- 设备缓存：后台周期采集，输出 `stale`、`cache_age_seconds`、`device_connected` 和 `connection_state`。
+- 报警：阈值报警 JSONL 记录，支持 `WARN / CRITICAL / ERROR`，避免同一异常状态重复刷屏。
+- 审计：工具调用 JSONL 审计，写操作记录为 `read_only=false`，敏感参数脱敏。
+- 可观测性：内置 HTTP 健康接口和 Prometheus text format 指标。
+- 存储：默认 JSONL，可选 SQLite3；未编译 SQLite 时自动回退 JSONL。
+- 部署资产：`Dockerfile`、`compose.yaml`、`deploy/systemd/industrial-mcp-server.service`、`deploy/prometheus/prometheus.yml`。
 
-## 构建
+## 目录结构
 
-Windows / MinGW:
+源码已按模块拆分：
 
-```powershell
-cmake -S . -B build -G Ninja -DINDUSTRIAL_MCP_WITH_OPCUA=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+```text
+include/industrial_mcp/
+  alarm/
+  connector/
+  device/
+  diagnosis/
+  mcp/
+  observability/
+  reliability/
+  storage/
+src/
+  alarm/
+  connector/
+  device/
+  diagnosis/
+  mcp/
+  observability/
+  reliability/
+  storage/
+tests/
+  unit/
+  integration/
+  fault_injection/
 ```
 
-Linux / Ubuntu:
+旧路径头文件仍保留为转发头，例如 `include/industrial_mcp/config.hpp` 会转发到 `include/industrial_mcp/mcp/config.hpp`，用于降低已有代码的迁移风险。
+
+## 构建与测试
+
+Windows / MinGW：
+
+```powershell
+cmake -S . -B build-codex-p3 -G Ninja -DINDUSTRIAL_MCP_WITH_OPCUA=ON
+cmake --build build-codex-p3 --target industrial_mcp_tests --parallel 1
+ctest --test-dir build-codex-p3 --output-on-failure
+```
+
+Linux / Ubuntu：
 
 ```bash
 cmake -S . -B build -G Ninja -DINDUSTRIAL_MCP_WITH_OPCUA=ON -DCMAKE_BUILD_TYPE=Release
@@ -58,83 +89,31 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`INDUSTRIAL_MCP_WITH_OPCUA=ON` 会构建 `third_party/open62541pp` 及其内部 `open62541`。首次全量构建会明显慢于后续增量构建。
-
-## 运行
-
-Windows:
+拆分测试目标：
 
 ```powershell
-.\build\industrial-mcp-server.exe --config config\config.example.json
+cmake --build build-codex-p3 --target industrial_mcp_unit_tests --parallel 1
+cmake --build build-codex-p3 --target industrial_mcp_integration_tests --parallel 1
+cmake --build build-codex-p3 --target industrial_mcp_fault_injection_tests --parallel 1
 ```
 
-Linux:
+聚合目标 `industrial_mcp_tests` 继续保留，兼容既有验收命令。
 
-```bash
-./build/industrial-mcp-server --config config/config.example.json
-```
+## 本地模拟设备
 
-MCP Server 使用 stdio，一行一个 JSON-RPC 请求。
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"initialize"}
-```
-
-```json
-{"jsonrpc":"2.0","method":"notifications/initialized"}
-```
-
-```json
-{"jsonrpc":"2.0","id":2,"method":"tools/list"}
-```
-
-## 6 个工具调用示例
-
-```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_devices","arguments":{}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_node","arguments":{"device_id":"pump-1","variable":"temperature"}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"write_node","arguments":{"device_id":"pump-1","variable":"temperature","value":55.5}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_alarm_history","arguments":{"device_id":"pump-1","limit":10}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"diagnose_fault","arguments":{"device_id":"pump-1"}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_network_status","arguments":{"device_id":"pump-1"}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_device_state","arguments":{"device_id":"pump-1"}}}
-```
-
-## open62541 模拟设备
-
-构建 `INDUSTRIAL_MCP_WITH_OPCUA=ON` 时会生成独立模拟设备程序。
-
-Windows:
+启用 `INDUSTRIAL_MCP_WITH_OPCUA=ON` 后会生成模拟 OPC UA Server：
 
 ```powershell
-.\build\opcua-sim-server.exe --port 48520
+.\build-codex-p3\opcua-sim-server.exe --port 48520
 ```
 
-Linux:
+Linux：
 
 ```bash
 ./build/opcua-sim-server --port 48520
 ```
 
-模拟 Server 暴露：
+模拟 endpoint：
 
 ```text
 opc.tcp://127.0.0.1:48520
@@ -149,91 +128,38 @@ ns=1;s=Pump1.Running
 ns=1;s=Pump1.Label
 ```
 
-真实 OPC UA 联调时使用：
+真实联调配置使用 `config/config.opcua-sim.json`。
 
-```text
-config/config.opcua-sim.json
-```
+## HTTP 健康与指标
 
-## 写入安全边界
+服务仍以 stdio MCP 为主协议，同时按配置启动轻量 HTTP 健康/指标接口：
 
-`write_node` 默认关闭，必须同时满足以下条件才允许写入：
+- `/health/live`
+- `/health/ready`
+- `/health/devices`
+- `/metrics`
+
+`/metrics` 只有在 `observability.metrics_enabled=true` 时返回 Prometheus 指标，否则返回禁用说明。
+
+## 安全边界
+
+`write_node` 默认不可用。写入必须同时满足：
 
 - `server.read_only=false`
 - `opcua.write_enabled=true`
-- 目标变量配置 `writable=true`
-- 写入目标必须是配置文件里的变量名，不支持 raw `node_id` 写入
+- 当前角色允许调用 `write_node`
+- 目标设备和变量存在于配置白名单
+- 目标变量 `writable=true`
+- 写入值满足变量 `data_type`、`min`、`max`、`allowed_values`
 
-默认示例 `config/config.example.json` 保持只读。`config/config.opcua-sim.json` 仅用于本地模拟联调，已开启安全测试变量写入。
-
-## 配置字段
-
-关键字段：
-
-- `server.name` / `server.version`：MCP `initialize` 返回的服务信息。
-- `server.read_only`：全局只读开关，生产环境建议保持 `true`。
-- `opcua.connect_timeout_ms`：OPC UA 连接超时。
-- `opcua.read_timeout_ms`：OPC UA 请求超时。
-- `opcua.retry_count`：失败后重试次数，`1` 表示最多尝试 2 次。
-- `opcua.retry_delay_ms`：重试间隔。
-- `opcua.allow_raw_node_id`：是否允许 `read_node` 读取显式 `node_id`。
-- `opcua.write_enabled`：是否启用 OPC UA 写入。
-- `cache.enabled`：是否启用后台周期采集和设备状态缓存。
-- `cache.poll_interval_ms`：后台采集周期，默认 `2000`。
-- `cache.stale_after_ms`：缓存超过该时长未更新后标记为 stale，默认 `10000`。
-- `security.enabled`：是否启用 RBAC 工具权限控制。
-- `security.default_role`：未提供调用上下文时使用的默认角色，默认 `viewer`。
-- `security.roles`：角色到 MCP 工具名的权限映射，`administrator` 可使用 `*`。
-- `timeouts.mcp_request_ms` / `tool_execution_ms` / `opcua_request_ms`：第三阶段分层超时配置。
-- `observability.metrics_enabled` / `metrics_port`：Prometheus 指标配置预留。
-- `storage.type` / `sqlite_path`：生产持久化配置预留，当前 JSONL 仍保持兼容。
-- `audit.log_path`：工具调用审计 JSONL 路径，留空关闭审计。
-- `alarm_log_path`：报警 JSONL 文件路径。
-- `devices[].endpoint`：支持 `mock://...` 和 `opc.tcp://...`。
-- `devices[].enabled`：是否启用设备。
-- `devices[].protocol`：工业协议类型，当前支持 `opcua`。
-- `devices[].variables[].writable`：变量是否允许 `write_node` 写入。
-- `devices[].variables[].min` / `max` / `allowed_values`：写入范围或枚举白名单。
-
-## 第三阶段安全工具
-
-默认角色 `viewer` 只能调用读类工具。低风险写操作和高风险操作需要 `operator` 或 `administrator` 权限。
-
-高风险操作采用两阶段审批骨架：
-
-```json
-{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"prepare_device_action","arguments":{"device_id":"pump-1","action":"stop"}}}
-```
-
-```json
-{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"confirm_device_action","arguments":{"operation_id":"op-..."}}}
-```
-
-当前第三阶段骨架只完成 `operation_id` 生命周期管理，不直接执行新增设备启停动作。
-
-## 部署资产
-
-仓库包含：
-
-- `Dockerfile`
-- `compose.yaml`
-- `deploy/systemd/industrial-mcp-server.service`
-- `deploy/prometheus/prometheus.yml`
-
-## 审计日志
-
-启用 `audit.log_path` 后，每次 `tools/call` 会追加一条 JSONL 记录：
-
-```json
-{"timestamp":"2026-06-11T08:00:00Z","event":"tool_call","tool":"write_node","device_id":"pump-1","ok":true,"elapsed_ms":3,"read_only":false,"arguments":{"device_id":"pump-1","variable":"temperature","value":55.5}}
-```
-
-参数名 `password`、`token`、`secret`、`private_key` 会脱敏。
+生产环境建议默认保持只读，并只在受控维护窗口开启写入。
 
 ## 当前限制
 
-- OPC UA 写入仅支持常见标量类型：Boolean、Double、Float、Int32、UInt32、Int16、UInt16、String。
-- 不支持数组、结构体、证书、安全策略、用户名密码认证和 OPC UA 方法调用。
-- 网络状态统计为进程内状态，服务重启后清零。
-- 设备状态缓存和自动报警状态为进程内状态，服务重启后重新采集和判定。
-- 故障诊断仍是规则式辅助诊断，不能替代现场安全规程。
+- HTTP 只提供健康和指标接口，不提供 MCP over HTTP。
+- OPC UA Subscription 尚未实现，当前仍使用周期采集和按需读写。
+- SQLite 为可选依赖；未检测到 SQLite3 时使用 JSONL。
+- 诊断模块生成 LLM 上下文，不在 C++ 内部调用大模型。
+- 高风险操作两阶段确认目前是生命周期和审计骨架，不直接执行新增设备启停动作。
+
+更多客户端配置见 [docs/mcp-client.md](docs/mcp-client.md)，运维部署见 [docs/operations.md](docs/operations.md)，最终验收矩阵见 [docs/final-acceptance-matrix.md](docs/final-acceptance-matrix.md)。
