@@ -8,6 +8,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace industrial_mcp {
@@ -123,6 +124,13 @@ std::size_t optional_arg_limit(const Json& args, std::size_t fallback) {
     return fallback;
 }
 
+bool optional_arg_bool(const Json& args, const std::string& key, bool fallback) {
+    if (args.is_object() && args.contains(key) && args.at(key).is_boolean()) {
+        return args.at(key).get<bool>();
+    }
+    return fallback;
+}
+
 Json status_to_json(const DeviceStatus& status) {
     return {
         {"device_id", status.device_id},
@@ -187,6 +195,27 @@ Json write_result_to_json(const OpcUaWriteResult& write,
     };
 }
 
+Json method_result_to_json(const OpcUaMethodResult& call,
+                           const std::string& device_id,
+                           const MethodConfig& method) {
+    return {
+        {"ok", call.ok},
+        {"device_id", device_id},
+        {"method", method.name},
+        {"object_id", method.object_id},
+        {"method_id", method.method_id},
+        {"output_arguments", call.output_arguments},
+        {"timestamp", call.timestamp},
+        {"quality", call.quality},
+        {"status_code", call.status_code},
+        {"error", call.error},
+        {"error_code", call.error_code},
+        {"latency_ms", call.latency_ms},
+        {"attempts", call.attempts},
+        {"read_only", false},
+    };
+}
+
 Json variable_to_json(const VariableConfig& variable) {
     Json out = {
         {"name", variable.name},
@@ -204,6 +233,41 @@ Json variable_to_json(const VariableConfig& variable) {
     if (variable.write_max) out["max"] = *variable.write_max;
     if (!variable.allowed_values.empty()) out["allowed_values"] = variable.allowed_values;
     return out;
+}
+
+Json method_to_json(const MethodConfig& method) {
+    return {
+        {"name", method.name},
+        {"object_id", method.object_id},
+        {"method_id", method.method_id},
+        {"description", method.description},
+        {"enabled", method.enabled},
+        {"requires_confirmation", method.requires_confirmation},
+        {"input_types", method.input_types},
+    };
+}
+
+Json device_to_json(const DeviceConfig& device) {
+    Json variables = Json::array();
+    for (const auto& [_, variable] : device.variables) {
+        variables.push_back(variable_to_json(variable));
+    }
+    Json methods = Json::array();
+    for (const auto& [_, method] : device.methods) {
+        methods.push_back(method_to_json(method));
+    }
+    return {
+        {"id", device.id},
+        {"name", device.name},
+        {"protocol", device.protocol},
+        {"enabled", device.enabled},
+        {"endpoint", device.endpoint},
+        {"endpoint_type", device.endpoint.rfind("mock://", 0) == 0 ? "mock" : "opcua"},
+        {"variable_count", static_cast<int>(device.variables.size())},
+        {"method_count", static_cast<int>(device.methods.size())},
+        {"variables", variables},
+        {"methods", methods},
+    };
 }
 
 Json tool(const std::string& name,
@@ -271,6 +335,7 @@ Json prepare_device_action_input_schema() {
             {"device_id", schema_string("Configured device id.")},
             {"action", schema_string("Action name, for example write_node or stop.")},
             {"variable", schema_string("Optional variable for write actions.")},
+            {"method", schema_string("Optional configured method name for call_device_method actions.")},
             {"value", schema_value("Optional value for write actions.")},
         },
         Json::array({"device_id", "action"})
@@ -281,6 +346,18 @@ Json operation_id_input_schema() {
     return object_schema({{"operation_id", schema_string("Prepared operation id.")}}, Json::array({"operation_id"}));
 }
 
+Json call_device_method_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"method", schema_string("Configured method name.")},
+            {"arguments", {{"type", "array"}}},
+            {"operation_id", schema_string("Confirmed operation id for high-risk methods.")},
+        },
+        Json::array({"device_id", "method"})
+    );
+}
+
 Json write_node_input_schema() {
     return object_schema(
         {
@@ -289,6 +366,34 @@ Json write_node_input_schema() {
             {"value", schema_value("Boolean, number, integer, or string value matching the configured data_type.")},
         },
         Json::array({"device_id", "variable", "value"})
+    );
+}
+
+Json add_device_input_schema() {
+    return object_schema({{"device", {{"type", "object"}}}}, Json::array({"device"}));
+}
+
+Json update_alarm_rule_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"variable", schema_string("Configured variable name.")},
+            {"warn_min", {{"type", Json::array({"number", "null"})}}},
+            {"warn_max", {{"type", Json::array({"number", "null"})}}},
+            {"alarm_min", {{"type", Json::array({"number", "null"})}}},
+            {"alarm_max", {{"type", Json::array({"number", "null"})}}},
+        },
+        Json::array({"device_id", "variable"})
+    );
+}
+
+Json remove_device_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"force", schema_boolean("Remove even if the device is enabled.")},
+        },
+        Json::array({"device_id"})
     );
 }
 
@@ -353,16 +458,27 @@ std::string tool_error_code(const Json& result) {
 
 bool tool_call_read_only(const std::string& tool_name) {
     return tool_name != "write_node" &&
+           tool_name != "call_device_method" &&
            tool_name != "acknowledge_alarm" &&
            tool_name != "clear_cached_alarm" &&
            tool_name != "refresh_device_state" &&
            tool_name != "prepare_device_action" &&
            tool_name != "confirm_device_action" &&
-           tool_name != "cancel_device_action";
+           tool_name != "cancel_device_action" &&
+           tool_name != "add_device" &&
+           tool_name != "remove_device" &&
+           tool_name != "enable_device" &&
+           tool_name != "disable_device" &&
+           tool_name != "reload_configuration" &&
+           tool_name != "update_alarm_rule";
 }
 
 ToolRiskLevel tool_risk(const std::string& tool_name) {
-    if (tool_name == "write_node" || tool_name == "prepare_device_action" || tool_name == "confirm_device_action") {
+    if (tool_name == "add_device" || tool_name == "remove_device" || tool_name == "enable_device" ||
+        tool_name == "disable_device" || tool_name == "reload_configuration" || tool_name == "update_alarm_rule") {
+        return ToolRiskLevel::Administrative;
+    }
+    if (tool_name == "write_node" || tool_name == "call_device_method" || tool_name == "prepare_device_action" || tool_name == "confirm_device_action") {
         return ToolRiskLevel::HighRiskWrite;
     }
     if (tool_name == "acknowledge_alarm" || tool_name == "clear_cached_alarm" || tool_name == "refresh_device_state" || tool_name == "cancel_device_action") {
@@ -401,6 +517,13 @@ bool is_known_tool(const std::string& tool_name) {
         "prepare_device_action",
         "confirm_device_action",
         "cancel_device_action",
+        "call_device_method",
+        "add_device",
+        "remove_device",
+        "enable_device",
+        "disable_device",
+        "reload_configuration",
+        "update_alarm_rule",
         "diagnose_fault",
     };
     return tools.find(tool_name) != tools.end();
@@ -457,9 +580,13 @@ std::string data_source_for_tool(const std::string& tool_name) {
     if (tool_name == "get_device_state" || tool_name == "diagnose_fault") return "cache";
     if (tool_name == "list_devices" || tool_name == "get_gateway_health" || tool_name == "get_server_health") return "configuration";
     if (tool_name == "get_alarm_history" || tool_name == "query_alarm_logs" || tool_name == "analyze_alarms" || tool_name == "acknowledge_alarm") return "alarm_store";
-    if (tool_name == "read_node" || tool_name == "read_opcua_node" || tool_name == "read_device_snapshot" || tool_name == "write_node" ||
+    if (tool_name == "read_node" || tool_name == "read_opcua_node" || tool_name == "read_device_snapshot" || tool_name == "write_node" || tool_name == "call_device_method" ||
         tool_name == "get_device_status" || tool_name == "get_device_health" || tool_name == "get_network_status" || tool_name == "refresh_device_state") {
         return "connection_manager";
+    }
+    if (tool_name == "add_device" || tool_name == "remove_device" || tool_name == "enable_device" ||
+        tool_name == "disable_device" || tool_name == "reload_configuration" || tool_name == "update_alarm_rule") {
+        return "runtime_configuration";
     }
     return "server";
 }
@@ -484,6 +611,45 @@ std::string validate_write_constraints(const VariableConfig& variable, const Jso
         if (variable.write_max && parsed > *variable.write_max) return "value is above configured max for variable: " + variable.name;
     }
     return {};
+}
+
+std::string validate_method_arguments(const MethodConfig& method, const Json& arguments) {
+    if (!arguments.is_array()) return "arguments must be an array";
+    if (arguments.size() != method.input_types.size()) return "argument count does not match input_types";
+    for (std::size_t index = 0; index < method.input_types.size(); ++index) {
+        const auto type = method.input_types.at(index);
+        const auto& value = arguments.at(index);
+        if ((type == "Boolean" || type == "Bool") && !value.is_boolean()) return "argument " + std::to_string(index) + " must be Boolean";
+        if ((type == "Double" || type == "Float") && !value.is_number()) return "argument " + std::to_string(index) + " must be numeric";
+        if ((type == "Int32" || type == "UInt32" || type == "Int16" || type == "UInt16") && !value.is_number_integer() && !value.is_number_unsigned()) {
+            return "argument " + std::to_string(index) + " must be integer";
+        }
+        if (type == "String" && !value.is_string()) return "argument " + std::to_string(index) + " must be String";
+    }
+    return {};
+}
+
+DeviceConfig parse_device_from_argument(const Json& device_json) {
+    Json root = {
+        {"devices", Json::array({device_json})},
+    };
+    auto parsed = ConfigLoader::load_json(root, ".");
+    if (parsed.devices.empty()) {
+        throw std::runtime_error("device argument did not produce a device");
+    }
+    return std::move(parsed.devices.front());
+}
+
+void apply_optional_threshold(const Json& args, const std::string& key, std::optional<double>& target) {
+    if (!args.contains(key)) return;
+    if (args.at(key).is_null()) {
+        target.reset();
+        return;
+    }
+    if (!args.at(key).is_number()) {
+        throw std::runtime_error(key + " must be a number or null");
+    }
+    target = args.at(key).get<double>();
 }
 
 } // namespace
@@ -568,7 +734,8 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
         }
 
         if (method == "tools/list") {
-            return make_response(id, list_tools());
+            const auto params = request.contains("params") ? request.at("params") : Json::object();
+            return make_response(id, list_tools(params));
         }
 
         if (method == "tools/call") {
@@ -595,12 +762,34 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
             audit_record.tool_name = tool_name;
             audit_record.device_id = optional_device_id(args);
             audit_record.target_node = optional_arg_string(args, "variable");
+            if (audit_record.target_node.empty()) audit_record.target_node = optional_arg_string(args, "method");
             audit_record.result = tool_result_ok(result) ? "ok" : "error";
             audit_record.elapsed_ms = elapsed;
             audit_record.error_code = tool_error_code(result);
             audit_record.arguments = args;
             audit_record.read_only = tool_call_read_only(tool_name);
             if (args.is_object() && args.contains("value")) audit_record.new_value = args.at("value");
+            if (result.is_object() && result.contains("structuredContent") && result.at("structuredContent").is_object()) {
+                const auto& content = result.at("structuredContent");
+                if (content.contains("old_device")) audit_record.old_value = content.at("old_device");
+                if (content.contains("old_variable")) audit_record.old_value = content.at("old_variable");
+                if (content.contains("removed_device")) audit_record.old_value = content.at("removed_device");
+                if (content.contains("new_device")) audit_record.new_value = content.at("new_device");
+                if (content.contains("new_variable")) audit_record.new_value = content.at("new_variable");
+                if (content.contains("device")) audit_record.new_value = content.at("device");
+                if (audit_record.device_id.empty() && content.contains("device_id") && content.at("device_id").is_string()) {
+                    audit_record.device_id = content.at("device_id").get<std::string>();
+                }
+                if (audit_record.device_id.empty() && content.contains("device") && content.at("device").is_object()) {
+                    audit_record.device_id = optional_object_string(content.at("device"), "id");
+                }
+                if (audit_record.device_id.empty() && content.contains("removed_device") && content.at("removed_device").is_object()) {
+                    audit_record.device_id = optional_object_string(content.at("removed_device"), "id");
+                }
+                if (audit_record.target_node.empty() && content.contains("method_id") && content.at("method_id").is_string()) {
+                    audit_record.target_node = content.at("method_id").get<std::string>();
+                }
+            }
             audit_.record(audit_record);
             const bool ok = tool_result_ok(result);
             metrics_.record_tool_call(tool_name, ok, elapsed);
@@ -626,29 +815,43 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
     }
 }
 
-Json McpServer::list_tools() const {
+Json McpServer::list_tools(const Json& params) const {
     Json tools = Json::array();
-    tools.push_back(tool("get_gateway_health", "Return read-only gateway health, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
-    tools.push_back(tool("get_server_health", "Return MCP server health, readiness, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
-    tools.push_back(tool("read_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
-    tools.push_back(tool("read_opcua_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
-    tools.push_back(tool("write_node", "Write one whitelisted configured OPC UA variable. Disabled unless server, RBAC, and config explicitly allow writes.", write_node_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
-    tools.push_back(tool("list_devices", "List configured industrial devices and their OPC UA variables without opening network sessions.", object_schema(Json::object()), generic_output_schema()));
-    tools.push_back(tool("read_device_snapshot", "Read all configured variables for a device.", device_id_input_schema(), generic_output_schema()));
-    tools.push_back(tool("get_device_state", "Return cached device state collected by the gateway without directly reading OPC UA for this call.", optional_device_id_input_schema(), generic_output_schema()));
-    tools.push_back(tool("refresh_device_state", "Force a cache refresh and return cached device state.", refresh_device_state_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
-    tools.push_back(tool("get_device_health", "Return one configured device health, communication status, and cache state.", device_id_input_schema(), generic_output_schema()));
-    tools.push_back(tool("get_device_status", "Return read-only device and OPC UA session status.", device_id_input_schema(), generic_output_schema()));
-    tools.push_back(tool("get_network_status", "Return per-device OPC UA communication status, latency, and disconnect counters.", optional_device_id_input_schema(), generic_output_schema()));
-    tools.push_back(tool("get_alarm_history", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
-    tools.push_back(tool("query_alarm_logs", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
-    tools.push_back(tool("analyze_alarms", "Summarize alarm counts, frequent codes, and timeline.", alarm_query_input_schema(), generic_output_schema()));
-    tools.push_back(tool("acknowledge_alarm", "Append an alarm acknowledgement record.", acknowledge_alarm_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
-    tools.push_back(tool("clear_cached_alarm", "Clear in-memory duplicate-suppression state for one cached alarm.", clear_cached_alarm_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
-    tools.push_back(tool("prepare_device_action", "Prepare a high-risk device operation and return a short-lived operation_id.", prepare_device_action_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
-    tools.push_back(tool("confirm_device_action", "Confirm a prepared high-risk device operation.", operation_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
-    tools.push_back(tool("cancel_device_action", "Cancel a prepared high-risk device operation.", operation_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
-    tools.push_back(tool("diagnose_fault", "Run rule-based fault diagnosis with evidence and limitations.", diagnose_input_schema(), generic_output_schema()));
+    const auto role = call_context_string(params, Json::object(), "role", config_.security.default_role);
+    auto add_tool = [&](Json item) {
+        const auto name = item.at("name").get<std::string>();
+        if (!config_.security.hide_unauthorized_tools || has_tool_permission(config_, role, name)) {
+            tools.push_back(std::move(item));
+        }
+    };
+    add_tool(tool("get_gateway_health", "Return read-only gateway health, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
+    add_tool(tool("get_server_health", "Return MCP server health, readiness, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
+    add_tool(tool("read_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
+    add_tool(tool("read_opcua_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
+    add_tool(tool("write_node", "Write one whitelisted configured OPC UA variable. Disabled unless server, RBAC, and config explicitly allow writes.", write_node_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
+    add_tool(tool("call_device_method", "Call one whitelisted OPC UA Method for a configured device.", call_device_method_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
+    add_tool(tool("list_devices", "List configured industrial devices and their OPC UA variables without opening network sessions.", object_schema(Json::object()), generic_output_schema()));
+    add_tool(tool("read_device_snapshot", "Read all configured variables for a device.", device_id_input_schema(), generic_output_schema()));
+    add_tool(tool("get_device_state", "Return cached device state collected by the gateway without directly reading OPC UA for this call.", optional_device_id_input_schema(), generic_output_schema()));
+    add_tool(tool("refresh_device_state", "Force a cache refresh and return cached device state.", refresh_device_state_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    add_tool(tool("get_device_health", "Return one configured device health, communication status, and cache state.", device_id_input_schema(), generic_output_schema()));
+    add_tool(tool("get_device_status", "Return read-only device and OPC UA session status.", device_id_input_schema(), generic_output_schema()));
+    add_tool(tool("get_network_status", "Return per-device OPC UA communication status, latency, and disconnect counters.", optional_device_id_input_schema(), generic_output_schema()));
+    add_tool(tool("get_alarm_history", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
+    add_tool(tool("query_alarm_logs", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
+    add_tool(tool("analyze_alarms", "Summarize alarm counts, frequent codes, and timeline.", alarm_query_input_schema(), generic_output_schema()));
+    add_tool(tool("acknowledge_alarm", "Append an alarm acknowledgement record.", acknowledge_alarm_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    add_tool(tool("clear_cached_alarm", "Clear in-memory duplicate-suppression state for one cached alarm.", clear_cached_alarm_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    add_tool(tool("prepare_device_action", "Prepare a high-risk device operation and return a short-lived operation_id.", prepare_device_action_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
+    add_tool(tool("confirm_device_action", "Confirm a prepared high-risk device operation.", operation_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
+    add_tool(tool("cancel_device_action", "Cancel a prepared high-risk device operation.", operation_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    add_tool(tool("add_device", "Add one device to the in-memory runtime configuration.", add_device_input_schema(), generic_output_schema(), false, ToolRiskLevel::Administrative));
+    add_tool(tool("remove_device", "Remove one device from the in-memory runtime configuration.", remove_device_input_schema(), generic_output_schema(), false, ToolRiskLevel::Administrative));
+    add_tool(tool("enable_device", "Enable one configured device in memory.", device_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::Administrative));
+    add_tool(tool("disable_device", "Disable one configured device in memory.", device_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::Administrative));
+    add_tool(tool("reload_configuration", "Reload the original startup configuration file and discard in-memory management changes.", object_schema(Json::object()), generic_output_schema(), false, ToolRiskLevel::Administrative));
+    add_tool(tool("update_alarm_rule", "Update threshold alarm rules for one configured variable in memory.", update_alarm_rule_input_schema(), generic_output_schema(), false, ToolRiskLevel::Administrative));
+    add_tool(tool("diagnose_fault", "Run rule-based fault diagnosis with evidence and limitations.", diagnose_input_schema(), generic_output_schema()));
     return {{"tools", tools}};
 }
 
@@ -683,26 +886,113 @@ Json McpServer::call_tool(const Json& params) {
         if (name == "list_devices") {
             Json devices = Json::array();
             for (const auto& device : config_.devices) {
-                Json variables = Json::array();
-                for (const auto& [_, variable] : device.variables) {
-                    variables.push_back(variable_to_json(variable));
-                }
-                devices.push_back({
-                    {"id", device.id},
-                    {"name", device.name},
-                    {"protocol", device.protocol},
-                    {"enabled", device.enabled},
-                    {"connection", connections_.health_json(device)},
-                    {"endpoint", device.endpoint},
-                    {"endpoint_type", device.endpoint.rfind("mock://", 0) == 0 ? "mock" : "opcua"},
-                    {"variable_count", static_cast<int>(device.variables.size())},
-                    {"variables", variables},
-                });
+                auto device_json = device_to_json(device);
+                device_json["connection"] = connections_.health_json(device);
+                devices.push_back(std::move(device_json));
             }
             return tool_result({
                 {"count", static_cast<int>(config_.devices.size())},
                 {"devices", devices},
                 {"read_only", true},
+            });
+        }
+
+        if (name == "add_device") {
+            if (!args.contains("device") || !args.at("device").is_object()) return tool_error("INVALID_ARGUMENT", "add_device requires device object");
+            auto device = parse_device_from_argument(args.at("device"));
+            if (find_device(config_, device.id) != nullptr) return tool_error("DEVICE_ALREADY_EXISTS", "device already exists: " + device.id);
+            const auto device_json = device_to_json(device);
+            state_cache_.stop();
+            config_.devices.push_back(std::move(device));
+            reset_runtime_after_config_change();
+            state_cache_.start();
+            return tool_result({{"ok", true}, {"device", device_json}, {"read_only", false}});
+        }
+
+        if (name == "remove_device") {
+            const auto device_id = required_arg_string(args, "device_id");
+            const bool force = optional_arg_bool(args, "force", false);
+            const auto found = std::find_if(config_.devices.begin(), config_.devices.end(), [&](const auto& device) {
+                return device.id == device_id;
+            });
+            if (found == config_.devices.end()) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (found->enabled && !force) return tool_error("DEVICE_IN_USE", "disable device or pass force=true before removal: " + device_id);
+            const auto old_device = device_to_json(*found);
+            state_cache_.stop();
+            config_.devices.erase(found);
+            reset_runtime_after_config_change();
+            state_cache_.start();
+            return tool_result({{"ok", true}, {"removed_device", old_device}, {"read_only", false}});
+        }
+
+        if (name == "enable_device" || name == "disable_device") {
+            const auto device_id = required_arg_string(args, "device_id");
+            auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            const auto old_device = device_to_json(*device);
+            state_cache_.stop();
+            device->enabled = name == "enable_device";
+            reset_runtime_after_config_change();
+            state_cache_.start();
+            return tool_result({
+                {"ok", true},
+                {"device_id", device_id},
+                {"enabled", device->enabled},
+                {"old_device", old_device},
+                {"new_device", device_to_json(*device)},
+                {"read_only", false},
+            });
+        }
+
+        if (name == "reload_configuration") {
+            if (config_.source_path.empty()) {
+                return tool_error("CONFIG_SOURCE_UNAVAILABLE", "server was not started from a configuration file");
+            }
+            try {
+                auto reloaded = ConfigLoader::load_file(config_.source_path);
+                state_cache_.stop();
+                config_ = std::move(reloaded);
+                reset_runtime_after_config_change();
+                state_cache_.start();
+                return tool_result({
+                    {"ok", true},
+                    {"source_path", config_.source_path},
+                    {"device_count", static_cast<int>(config_.devices.size())},
+                    {"read_only", false},
+                });
+            } catch (const std::exception& ex) {
+                return tool_error("CONFIG_RELOAD_FAILED", ex.what());
+            }
+        }
+
+        if (name == "update_alarm_rule") {
+            const auto device_id = required_arg_string(args, "device_id");
+            const auto variable_name = required_arg_string(args, "variable");
+            auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            auto* variable = find_variable(*device, variable_name);
+            if (variable == nullptr) return tool_error("ALARM_RULE_NOT_FOUND", "unknown variable: " + variable_name);
+            const auto old_variable = variable_to_json(*variable);
+            auto updated_variable = *variable;
+            try {
+                apply_optional_threshold(args, "warn_min", updated_variable.warn_min);
+                apply_optional_threshold(args, "warn_max", updated_variable.warn_max);
+                apply_optional_threshold(args, "alarm_min", updated_variable.alarm_min);
+                apply_optional_threshold(args, "alarm_max", updated_variable.alarm_max);
+            } catch (const std::exception& ex) {
+                return tool_error("INVALID_ARGUMENT", ex.what());
+            }
+            state_cache_.stop();
+            *variable = std::move(updated_variable);
+            state_cache_.reset();
+            state_cache_.start();
+            return tool_result({
+                {"ok", true},
+                {"device_id", device_id},
+                {"variable", variable_name},
+                {"old_variable", old_variable},
+                {"new_variable", variable_to_json(*variable)},
+                {"read_only", false},
             });
         }
 
@@ -778,6 +1068,12 @@ Json McpServer::call_tool(const Json& params) {
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
             if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
+            if (action == "call_device_method") {
+                const auto method_name = required_arg_string(args, "method");
+                const auto* method = find_method(*device, method_name);
+                if (method == nullptr) return tool_error("METHOD_NOT_FOUND", "unknown method: " + method_name);
+                if (!method->enabled) return tool_error("METHOD_DISABLED", "method is disabled: " + method_name);
+            }
 
             PendingOperation operation;
             {
@@ -822,7 +1118,7 @@ Json McpServer::call_tool(const Json& params) {
                 {"operation_id", operation_id},
                 {"confirmed", true},
                 {"executed", false},
-                {"message", "operation confirmed; no direct device control action is executed by this stage-3 skeleton"},
+                {"message", "operation confirmed; pass operation_id to the target high-risk tool to execute it"},
                 {"read_only", false},
             });
         }
@@ -836,6 +1132,51 @@ Json McpServer::call_tool(const Json& params) {
                 {"cancelled", erased > 0},
                 {"read_only", false},
             });
+        }
+
+        if (name == "call_device_method") {
+            const auto device_id = required_arg_string(args, "device_id");
+            const auto method_name = required_arg_string(args, "method");
+            const Json method_arguments = args.contains("arguments") ? args.at("arguments") : Json::array();
+            const auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
+            const auto* method = find_method(*device, method_name);
+            if (method == nullptr) return tool_error("METHOD_NOT_FOUND", "unknown method: " + method_name);
+            if (!method->enabled) return tool_error("METHOD_DISABLED", "method is disabled: " + method_name);
+            const auto argument_error = validate_method_arguments(*method, method_arguments);
+            if (!argument_error.empty()) return tool_error("INVALID_ARGUMENT", argument_error);
+
+            if (method->requires_confirmation) {
+                const auto operation_id = optional_arg_string(args, "operation_id");
+                if (operation_id.empty()) return tool_error("METHOD_CONFIRMATION_REQUIRED", "operation_id is required for method: " + method_name);
+                std::lock_guard<std::mutex> lock(operations_mutex_);
+                const auto found = pending_operations_.find(operation_id);
+                if (found == pending_operations_.end()) return tool_error("INVALID_ARGUMENT", "unknown operation_id: " + operation_id);
+                if (!found->second.confirmed) return tool_error("METHOD_CONFIRMATION_REQUIRED", "operation_id is not confirmed: " + operation_id);
+                if (std::chrono::steady_clock::now() > found->second.expires_at) {
+                    pending_operations_.erase(found);
+                    return tool_error("EXECUTION_TIMEOUT", "operation_id has expired: " + operation_id);
+                }
+                if (found->second.device_id != device_id || found->second.action != "call_device_method") {
+                    return tool_error("INVALID_ARGUMENT", "operation_id does not match requested device method call");
+                }
+                const auto prepared_method = optional_arg_string(found->second.arguments, "method");
+                if (!prepared_method.empty() && prepared_method != method_name) {
+                    return tool_error("INVALID_ARGUMENT", "operation_id was prepared for a different method");
+                }
+                pending_operations_.erase(found);
+            }
+
+            const auto call = connections_.call_method(*device, *method, method_arguments, config_.opcua);
+            auto payload = method_result_to_json(call, device_id, *method);
+            if (!call.ok) {
+                if (!payload.contains("error_code") || payload.at("error_code").get<std::string>().empty()) {
+                    payload["error_code"] = "OPCUA_METHOD_FAILED";
+                }
+                return tool_result(payload, true);
+            }
+            return tool_result(payload);
         }
 
         if (name == "read_node" || name == "read_opcua_node") {
@@ -959,12 +1300,14 @@ Json McpServer::call_tool(const Json& params) {
 
 Json McpServer::gateway_health() const {
     std::size_t variable_count = 0;
+    std::size_t method_count = 0;
     int mock_devices = 0;
     int opcua_devices = 0;
     Json devices = Json::array();
 
     for (const auto& device : config_.devices) {
         variable_count += device.variables.size();
+        method_count += device.methods.size();
         const bool mock = device.endpoint.rfind("mock://", 0) == 0;
         if (mock) {
             ++mock_devices;
@@ -978,6 +1321,7 @@ Json McpServer::gateway_health() const {
             {"enabled", device.enabled},
             {"endpoint_type", mock ? "mock" : "opcua"},
             {"variable_count", static_cast<int>(device.variables.size())},
+            {"method_count", static_cast<int>(device.methods.size())},
         });
     }
 
@@ -1037,6 +1381,7 @@ Json McpServer::gateway_health() const {
         {"configuration", {
             {"device_count", static_cast<int>(config_.devices.size())},
             {"variable_count", static_cast<int>(variable_count)},
+            {"method_count", static_cast<int>(method_count)},
             {"mock_device_count", mock_devices},
             {"opcua_device_count", opcua_devices},
             {"devices", devices},
@@ -1117,6 +1462,13 @@ Json McpServer::health_ready() const {
 
 std::string McpServer::metrics_text() const {
     return metrics_.prometheus_text(connections_.all_health_json(), state_cache_.state_json());
+}
+
+void McpServer::reset_runtime_after_config_change() {
+    connections_.reset();
+    state_cache_.reset();
+    std::lock_guard<std::mutex> lock(operations_mutex_);
+    pending_operations_.clear();
 }
 
 HttpResponse McpServer::handle_http_request(const std::string& path) const {

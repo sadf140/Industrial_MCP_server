@@ -26,7 +26,8 @@
   },
   "security": {
     "enabled": true,
-    "default_role": "viewer"
+    "default_role": "viewer",
+    "hide_unauthorized_tools": true
   },
   "timeouts": {
     "mcp_request_ms": 5000,
@@ -90,6 +91,18 @@
           "description": "running feedback",
           "mock_value": true,
           "writable": false
+        }
+      ],
+      "methods": [
+        {
+          "name": "reset_trip",
+          "object_id": "ns=0;i=85",
+          "method_id": "ns=1;i=1000",
+          "description": "mock reset trip method for safe client validation",
+          "enabled": true,
+          "requires_confirmation": true,
+          "input_types": ["String"],
+          "mock_result": ["reset accepted"]
         }
       ]
     }

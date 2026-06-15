@@ -58,6 +58,7 @@ public:
     void refresh_once();
     bool refresh_device(const std::string& device_id);
     bool clear_cached_alarm(const std::string& device_id, const std::string& variable = {});
+    void reset();
 
     bool enabled() const;
     Json state_json(const std::string& device_id = {}) const;

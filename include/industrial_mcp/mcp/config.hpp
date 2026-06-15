@@ -46,6 +46,7 @@ struct CacheConfig {
 struct SecurityConfig {
     bool enabled = true;
     std::string default_role = "viewer";
+    bool hide_unauthorized_tools = true;
     std::unordered_map<std::string, std::vector<std::string>> roles;
 };
 
@@ -90,6 +91,17 @@ struct VariableConfig {
     std::optional<double> alarm_max;
 };
 
+struct MethodConfig {
+    std::string name;
+    std::string object_id;
+    std::string method_id;
+    std::string description;
+    bool enabled = true;
+    bool requires_confirmation = true;
+    std::vector<std::string> input_types;
+    Json mock_result;
+};
+
 struct DeviceConfig {
     std::string id;
     std::string name;
@@ -97,9 +109,11 @@ struct DeviceConfig {
     std::string endpoint;
     bool enabled = true;
     std::unordered_map<std::string, VariableConfig> variables;
+    std::unordered_map<std::string, MethodConfig> methods;
 };
 
 struct AppConfig {
+    std::string source_path;
     ServerConfig server;
     TransportConfig transport;
     HttpConfig http;
@@ -122,6 +136,9 @@ public:
 };
 
 const DeviceConfig* find_device(const AppConfig& config, const std::string& device_id);
+DeviceConfig* find_device(AppConfig& config, const std::string& device_id);
 const VariableConfig* find_variable(const DeviceConfig& device, const std::string& name_or_node_id);
+VariableConfig* find_variable(DeviceConfig& device, const std::string& name_or_node_id);
+const MethodConfig* find_method(const DeviceConfig& device, const std::string& method_name);
 
 } // namespace industrial_mcp

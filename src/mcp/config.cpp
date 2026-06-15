@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace industrial_mcp {
 namespace {
@@ -100,10 +101,7 @@ std::unordered_map<std::string, std::vector<std::string>> default_roles() {
             "refresh_device_state",
             "acknowledge_alarm",
             "clear_cached_alarm",
-            "prepare_device_action",
-            "confirm_device_action",
             "cancel_device_action",
-            "write_node",
         }},
         {"administrator", {"*"}},
     };
@@ -120,8 +118,10 @@ std::string resolve_path(const std::string& base_dir, const std::string& value) 
 
 AppConfig ConfigLoader::load_file(const std::string& path) {
     const auto root = Json::parse(read_text_file(path));
-    const auto base_dir = std::filesystem::absolute(std::filesystem::path(path)).parent_path().string();
-    return load_json(root, base_dir);
+    const auto absolute_path = std::filesystem::absolute(std::filesystem::path(path));
+    auto config = load_json(root, absolute_path.parent_path().string());
+    config.source_path = absolute_path.string();
+    return config;
 }
 
 AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir) {
@@ -173,6 +173,7 @@ AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir)
         const auto& security = root.at("security");
         config.security.enabled = optional_bool(security, "enabled", config.security.enabled);
         config.security.default_role = optional_string(security, "default_role", config.security.default_role);
+        config.security.hide_unauthorized_tools = optional_bool(security, "hide_unauthorized_tools", config.security.hide_unauthorized_tools);
         if (security.contains("roles") && security.at("roles").is_object()) {
             for (auto it = security.at("roles").begin(); it != security.at("roles").end(); ++it) {
                 if (!it.value().is_array()) continue;
@@ -276,6 +277,29 @@ AppConfig ConfigLoader::load_json(const Json& root, const std::string& base_dir)
             device.variables.emplace(variable.name, std::move(variable));
         }
 
+        if (device_json.contains("methods") && device_json.at("methods").is_array()) {
+            for (const auto& method_json : device_json.at("methods")) {
+                if (!method_json.is_object()) {
+                    throw std::runtime_error("method item for device " + device.id + " must be an object");
+                }
+
+                MethodConfig method;
+                method.name = required_string(method_json, "name");
+                method.object_id = required_string(method_json, "object_id");
+                method.method_id = required_string(method_json, "method_id");
+                method.description = optional_string(method_json, "description");
+                method.enabled = optional_bool(method_json, "enabled", method.enabled);
+                method.requires_confirmation = optional_bool(method_json, "requires_confirmation", method.requires_confirmation);
+                if (method_json.contains("input_types") && method_json.at("input_types").is_array()) {
+                    for (const auto& item : method_json.at("input_types")) {
+                        if (item.is_string()) method.input_types.push_back(item.get<std::string>());
+                    }
+                }
+                method.mock_result = method_json.contains("mock_result") ? method_json.at("mock_result") : Json::array();
+                device.methods.emplace(method.name, std::move(method));
+            }
+        }
+
         config.devices.push_back(std::move(device));
     }
 
@@ -289,12 +313,34 @@ const DeviceConfig* find_device(const AppConfig& config, const std::string& devi
     return nullptr;
 }
 
+DeviceConfig* find_device(AppConfig& config, const std::string& device_id) {
+    for (auto& device : config.devices) {
+        if (device.id == device_id) return &device;
+    }
+    return nullptr;
+}
+
 const VariableConfig* find_variable(const DeviceConfig& device, const std::string& name_or_node_id) {
     const auto by_name = device.variables.find(name_or_node_id);
     if (by_name != device.variables.end()) return &by_name->second;
     for (const auto& [_, variable] : device.variables) {
         if (variable.node_id == name_or_node_id) return &variable;
     }
+    return nullptr;
+}
+
+VariableConfig* find_variable(DeviceConfig& device, const std::string& name_or_node_id) {
+    const auto by_name = device.variables.find(name_or_node_id);
+    if (by_name != device.variables.end()) return &by_name->second;
+    for (auto& [_, variable] : device.variables) {
+        if (variable.node_id == name_or_node_id) return &variable;
+    }
+    return nullptr;
+}
+
+const MethodConfig* find_method(const DeviceConfig& device, const std::string& method_name) {
+    const auto by_name = device.methods.find(method_name);
+    if (by_name != device.methods.end()) return &by_name->second;
     return nullptr;
 }
 

@@ -1,14 +1,14 @@
 # 最终验收矩阵
 
-本矩阵用于第三阶段第 5 轮完成后的外部验收。构建和测试由外部终端执行。
+本矩阵用于第三阶段补充迭代 3.6 完成后的外部验收。构建和测试由外部终端执行。
 
 ## 核心 MCP 功能
 
 | 功能 | MCP 工具 | 期望结果 | 状态 |
 | --- | --- | --- | --- |
-| 读取指定 OPC UA 节点值 | `read_node` | 能按 `device_id` 和 `variable` 读取配置白名单变量 | 已实现，待外部构建验证 |
+| 读取指定 OPC UA 节点值 | `read_node` | 按 `device_id` 和 `variable` 读取配置白名单变量 | 已实现，待外部构建验证 |
 | 写入指定 OPC UA 节点值 | `write_node` | 默认拒绝；开启只读边界、RBAC 和变量白名单后可写；越界或类型错误返回结构化错误 | 已实现，待外部构建验证 |
-| 列出当前接入设备 | `list_devices` | 返回设备 ID、名称、endpoint、变量、阈值和连接状态摘要 | 已实现，待外部构建验证 |
+| 列出当前接入设备 | `list_devices` | 返回设备、变量、方法白名单、阈值和连接状态摘要 | 已实现，待外部构建验证 |
 | 查询报警历史 | `get_alarm_history` | 支持设备、等级、时间、关键字和 limit 查询；兼容 `severity` | 已实现，待外部构建验证 |
 | 生成故障诊断上下文 | `diagnose_fault` | 返回设备状态、报警、阈值、通信和 LLM 关注点上下文 | 已实现，待外部构建验证 |
 | 查询网络状态 | `get_network_status` | 返回在线状态、延迟、断连/重连次数、连续失败、最后错误和熔断状态 | 已实现，待外部构建验证 |
@@ -18,12 +18,14 @@
 | 能力 | 验收点 | 状态 |
 | --- | --- | --- |
 | MCP 生命周期 | 支持 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call` | 已实现 |
-| 统一错误与上下文 | 工具结果包含结构化错误、耗时、设备、数据来源和缓存状态 | 已实现 |
-| RBAC | `viewer` 只读，`operator` 受控写，`administrator` 全权限 | 已实现 |
-| 写入约束 | 支持 `min`、`max`、`allowed_values` 和变量白名单 | 已实现 |
-| 高风险操作确认 | 支持 `prepare_device_action`、`confirm_device_action`、`cancel_device_action` 骨架 | 已实现 |
+| RBAC 与工具隐藏 | `viewer` 只读且隐藏未授权工具；`administrator` 可见全部工具 | 已实现 |
+| 低风险操作 | `acknowledge_alarm`、`clear_cached_alarm`、`refresh_device_state` | 已实现 |
+| 高风险确认 | `prepare_device_action`、`confirm_device_action`、`cancel_device_action` 支持一次性 `operation_id` | 已实现 |
+| OPC UA Method Call | `call_device_method` 只调用配置白名单方法，默认需要确认 | 已实现，待外部构建验证 |
+| 运行期设备管理 | `add_device`、`remove_device`、`enable_device`、`disable_device` 只修改进程内配置并写审计 | 已实现，待外部构建验证 |
+| 运行期规则管理 | `update_alarm_rule` 支持阈值设置/清空，`reload_configuration` 可恢复启动配置 | 已实现，待外部构建验证 |
 | 多设备连接管理 | 每台设备独立状态、失败计数、重连计数、最近错误 | 已实现 |
-| Connector 抽象 | `MockConnector` 与 `OpcUaConnector` 分离 | 已实现 |
+| Connector 抽象 | `MockConnector` 与 `OpcUaConnector` 分离，均支持读、写、状态、方法调用 | 已实现 |
 | 可靠性 | 读重试、指数退避、熔断 `Closed/Open/HalfOpen` | 已实现 |
 | 缓存降级 | `stale`、`cache_age_seconds`、`device_connected`、`connection_state` | 已实现 |
 | 观测指标 | `/metrics` 输出 Prometheus text format | 已实现 |
@@ -84,7 +86,9 @@ config/config.opcua-sim.json
 list_devices
 read_node(device_id=pump-1, variable=temperature)
 write_node(device_id=pump-1, variable=temperature, value=55.5)
-read_node(device_id=pump-1, variable=temperature)
+prepare_device_action(device_id=pump-1, action=call_device_method, method=reset_trip)
+confirm_device_action(operation_id=<operation_id>)
+call_device_method(device_id=pump-1, method=reset_trip, arguments=["maintenance"], operation_id=<operation_id>)
 get_device_state(device_id=pump-1)
 get_alarm_history(device_id=pump-1, limit=10)
 get_network_status(device_id=pump-1)
@@ -100,4 +104,4 @@ get_device_health(device_id=pump-1)
 - MCP over HTTP 远程传输
 - OPC UA Subscription
 - C++ 内部直接调用 LLM
-- 新增真实设备启停控制动作
+- 将运行期管理变更写回 JSON 配置文件或 SQLite 配置表

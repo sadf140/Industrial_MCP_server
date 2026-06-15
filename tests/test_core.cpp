@@ -20,6 +20,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace industrial_mcp;
@@ -49,6 +50,18 @@ bool has_tool(const Json& tools, const std::string& name) {
         }
     }
     return false;
+}
+
+Json call_tool_result(McpServer& server, const std::string& name, Json arguments = Json::object()) {
+    Json request = {
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", name}, {"arguments", std::move(arguments)}}},
+    };
+    const auto response = server.handle_message(request);
+    assert(response.has_value());
+    return response->at("result");
 }
 
 AppConfig make_mock_config(const std::string& audit_path = {}, const std::string& alarm_path = {}) {
@@ -98,6 +111,16 @@ AppConfig make_mock_config(const std::string& audit_path = {}, const std::string
                 "data_type": "Boolean",
                 "mock_value": true,
                 "writable": false
+            }],
+            "methods": [{
+                "name": "reset_trip",
+                "object_id": "ns=0;i=85",
+                "method_id": "ns=1;i=1000",
+                "description": "mock reset trip",
+                "enabled": true,
+                "requires_confirmation": true,
+                "input_types": ["String"],
+                "mock_result": ["reset accepted"]
             }]
         }]
     })");
@@ -138,7 +161,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(tools.at(0).contains("outputSchema"));
     assert(tools.at(0).at("name").get<std::string>() == "get_gateway_health");
     assert(has_tool(tools, "read_node"));
-    assert(has_tool(tools, "write_node"));
+    assert(!has_tool(tools, "write_node"));
     assert(has_tool(tools, "list_devices"));
     assert(has_tool(tools, "get_alarm_history"));
     assert(has_tool(tools, "diagnose_fault"));
@@ -146,12 +169,29 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(has_tool(tools, "get_device_state"));
     assert(has_tool(tools, "get_server_health"));
     assert(has_tool(tools, "get_device_health"));
-    assert(has_tool(tools, "refresh_device_state"));
-    assert(has_tool(tools, "acknowledge_alarm"));
-    assert(has_tool(tools, "clear_cached_alarm"));
-    assert(has_tool(tools, "prepare_device_action"));
-    assert(has_tool(tools, "confirm_device_action"));
-    assert(has_tool(tools, "cancel_device_action"));
+    assert(!has_tool(tools, "refresh_device_state"));
+    assert(!has_tool(tools, "acknowledge_alarm"));
+    assert(!has_tool(tools, "clear_cached_alarm"));
+    assert(!has_tool(tools, "prepare_device_action"));
+    assert(!has_tool(tools, "confirm_device_action"));
+    assert(!has_tool(tools, "cancel_device_action"));
+    assert(!has_tool(tools, "call_device_method"));
+    assert(!has_tool(tools, "add_device"));
+
+    auto admin_config = config;
+    admin_config.security.default_role = "administrator";
+    McpServer admin_server(admin_config);
+    const auto admin_list = admin_server.handle_message(Json::parse(R"({"jsonrpc":"2.0","id":31,"method":"tools/list"})"));
+    assert(admin_list.has_value());
+    const auto& admin_tools = admin_list->at("result").at("tools");
+    assert(has_tool(admin_tools, "write_node"));
+    assert(has_tool(admin_tools, "call_device_method"));
+    assert(has_tool(admin_tools, "add_device"));
+    assert(has_tool(admin_tools, "remove_device"));
+    assert(has_tool(admin_tools, "enable_device"));
+    assert(has_tool(admin_tools, "disable_device"));
+    assert(has_tool(admin_tools, "reload_configuration"));
+    assert(has_tool(admin_tools, "update_alarm_rule"));
 
     const auto health = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -166,6 +206,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(health_content.at("server").at("version").get<std::string>() == "0.5.0-p3");
     assert(health_content.at("configuration").at("device_count").get<int>() == 1);
     assert(health_content.at("configuration").at("variable_count").get<int>() == 2);
+    assert(health_content.at("configuration").at("method_count").get<int>() == 1);
     assert(health_content.at("uptime_ms").get<long long>() >= 0);
     assert(!health_content.at("cache").at("enabled").get<bool>());
     assert(health_content.at("reliability").at("circuit_failure_threshold").get<int>() == 3);
@@ -212,6 +253,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(devices_content.at("count").get<int>() == 1);
     assert(devices_content.at("devices").at(0).at("id").get<std::string>() == "pump-1");
     assert(devices_content.at("devices").at(0).at("variables").size() == 2);
+    assert(devices_content.at("devices").at(0).at("methods").size() == 1);
     assert(devices_content.at("devices").at(0).at("variables").at(0).contains("writable"));
 
     const auto network = server.handle_message(Json::parse(R"({
@@ -720,7 +762,21 @@ void test_stage3_security_health_and_operations() {
     assert(ack.has_value());
     assert(ack->at("result").at("structuredContent").at("ok").get<bool>());
 
-    const auto prepared = operator_server.handle_message(Json::parse(R"({
+    const auto denied_prepare = operator_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":87,
+        "method":"tools/call",
+        "params":{"name":"prepare_device_action","arguments":{"device_id":"pump-1","action":"stop"}}
+    })"));
+    assert(denied_prepare.has_value());
+    assert(denied_prepare->at("result").at("isError").get<bool>());
+    assert(denied_prepare->at("result").at("structuredContent").at("error").get<std::string>() == "PERMISSION_DENIED");
+
+    auto admin_config = make_mock_config({}, alarm_path);
+    admin_config.security.default_role = "administrator";
+    McpServer admin_server(admin_config);
+
+    const auto prepared = admin_server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
         "id":84,
         "method":"tools/call",
@@ -739,7 +795,7 @@ void test_stage3_security_health_and_operations() {
             {"arguments", {{"operation_id", operation_id}}},
         }},
     };
-    const auto confirmed = operator_server.handle_message(confirm);
+    const auto confirmed = admin_server.handle_message(confirm);
     assert(confirmed.has_value());
     assert(confirmed->at("result").at("structuredContent").at("confirmed").get<bool>());
     assert(!confirmed->at("result").at("structuredContent").at("executed").get<bool>());
@@ -752,7 +808,7 @@ void test_write_node_policy_and_audit() {
     std::remove(audit_path.c_str());
 
     auto config = make_mock_config(audit_path);
-    config.security.default_role = "operator";
+    config.security.default_role = "administrator";
     config.server.read_only = false;
     config.opcua.write_enabled = true;
     auto* device = const_cast<DeviceConfig*>(find_device(config, "pump-1"));
@@ -792,6 +848,99 @@ void test_write_node_policy_and_audit() {
     std::remove(audit_path.c_str());
 }
 
+void test_runtime_management_and_method_call() {
+    auto config = make_mock_config();
+    config.security.default_role = "administrator";
+    config.server.read_only = false;
+    config.opcua.write_enabled = true;
+    McpServer server(config);
+
+    const auto method_without_confirmation = call_tool_result(
+        server,
+        "call_device_method",
+        {{"device_id", "pump-1"}, {"method", "reset_trip"}, {"arguments", Json::array({"maintenance"})}}
+    );
+    assert(method_without_confirmation.at("isError").get<bool>());
+    assert(method_without_confirmation.at("structuredContent").at("error").get<std::string>() == "METHOD_CONFIRMATION_REQUIRED");
+    const auto bad_method_arguments = call_tool_result(
+        server,
+        "call_device_method",
+        {{"device_id", "pump-1"}, {"method", "reset_trip"}, {"arguments", Json::array({123})}, {"operation_id", "missing-op"}}
+    );
+    assert(bad_method_arguments.at("isError").get<bool>());
+    assert(bad_method_arguments.at("structuredContent").at("error").get<std::string>() == "INVALID_ARGUMENT");
+    const auto unknown_method_operation = call_tool_result(
+        server,
+        "call_device_method",
+        {{"device_id", "pump-1"}, {"method", "reset_trip"}, {"arguments", Json::array({"maintenance"})}, {"operation_id", "missing-op"}}
+    );
+    assert(unknown_method_operation.at("isError").get<bool>());
+    assert(unknown_method_operation.at("structuredContent").at("error").get<std::string>() == "INVALID_ARGUMENT");
+
+    const auto prepared = call_tool_result(
+        server,
+        "prepare_device_action",
+        {{"device_id", "pump-1"}, {"action", "call_device_method"}, {"method", "reset_trip"}}
+    );
+    const auto operation_id = prepared.at("structuredContent").at("operation_id").get<std::string>();
+    assert(!operation_id.empty());
+    const auto confirmed = call_tool_result(server, "confirm_device_action", {{"operation_id", operation_id}});
+    assert(confirmed.at("structuredContent").at("confirmed").get<bool>());
+    const auto method = call_tool_result(
+        server,
+        "call_device_method",
+        {{"device_id", "pump-1"}, {"method", "reset_trip"}, {"arguments", Json::array({"maintenance"})}, {"operation_id", operation_id}}
+    );
+    assert(method.at("structuredContent").at("ok").get<bool>());
+    assert(method.at("structuredContent").at("output_arguments").at(0).get<std::string>() == "reset accepted");
+
+    const auto add = call_tool_result(server, "add_device", {{"device", {
+        {"id", "pump-2"},
+        {"name", "Pump 2"},
+        {"endpoint", "mock://pump-2"},
+        {"variables", Json::array({
+            {{"name", "temperature"}, {"node_id", "ns=2;s=Pump2.Temperature"}, {"data_type", "Double"}, {"mock_value", 55.0}}
+        })},
+        {"methods", Json::array({
+            {{"name", "ping"}, {"object_id", "ns=0;i=85"}, {"method_id", "ns=1;i=1001"}, {"enabled", true}, {"requires_confirmation", false}, {"input_types", Json::array()}, {"mock_result", Json::array({"pong"})}}
+        })},
+    }}});
+    assert(add.at("structuredContent").at("ok").get<bool>());
+    assert(call_tool_result(server, "list_devices").at("structuredContent").at("count").get<int>() == 2);
+    assert(call_tool_result(server, "read_node", {{"device_id", "pump-2"}, {"variable", "temperature"}}).at("structuredContent").at("ok").get<bool>());
+    const auto ping = call_tool_result(server, "call_device_method", {{"device_id", "pump-2"}, {"method", "ping"}, {"arguments", Json::array()}});
+    assert(ping.at("structuredContent").at("ok").get<bool>());
+    assert(ping.at("structuredContent").at("output_arguments").at(0).get<std::string>() == "pong");
+    const auto unknown_method = call_tool_result(server, "call_device_method", {{"device_id", "pump-2"}, {"method", "missing"}, {"arguments", Json::array()}});
+    assert(unknown_method.at("isError").get<bool>());
+    assert(unknown_method.at("structuredContent").at("error").get<std::string>() == "METHOD_NOT_FOUND");
+
+    const auto disable = call_tool_result(server, "disable_device", {{"device_id", "pump-2"}});
+    assert(!disable.at("structuredContent").at("enabled").get<bool>());
+    const auto disabled_read = call_tool_result(server, "read_node", {{"device_id", "pump-2"}, {"variable", "temperature"}});
+    assert(disabled_read.at("isError").get<bool>());
+    assert(disabled_read.at("structuredContent").at("error").get<std::string>() == "DEVICE_DISABLED");
+
+    const auto enable = call_tool_result(server, "enable_device", {{"device_id", "pump-2"}});
+    assert(enable.at("structuredContent").at("enabled").get<bool>());
+    const auto update_rule = call_tool_result(server, "update_alarm_rule", {
+        {"device_id", "pump-2"},
+        {"variable", "temperature"},
+        {"warn_max", 50.0},
+        {"alarm_max", nullptr},
+    });
+    assert(update_rule.at("structuredContent").at("ok").get<bool>());
+    assert(update_rule.at("structuredContent").at("new_variable").at("warn_max").get<double>() == 50.0);
+    assert(!update_rule.at("structuredContent").at("new_variable").contains("alarm_max"));
+
+    const auto remove_blocked = call_tool_result(server, "remove_device", {{"device_id", "pump-2"}});
+    assert(remove_blocked.at("isError").get<bool>());
+    assert(remove_blocked.at("structuredContent").at("error").get<std::string>() == "DEVICE_IN_USE");
+    const auto removed = call_tool_result(server, "remove_device", {{"device_id", "pump-2"}, {"force", true}});
+    assert(removed.at("structuredContent").at("ok").get<bool>());
+    assert(call_tool_result(server, "list_devices").at("structuredContent").at("count").get<int>() == 1);
+}
+
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
 void test_opcua_integration() {
     constexpr uint16_t port = 48520;
@@ -809,6 +958,16 @@ void test_opcua_integration() {
     running.writeValue(opcua::Variant{true});
     auto label = objects.addVariable({1, "Pump1.Label"}, "Pump1.Label", writable);
     label.writeValue(opcua::Variant{std::string{"pump-alpha"}});
+    objects.addMethod(
+        {1, 1000},
+        "Pump1.ResetTrip",
+        [](opcua::Span<const opcua::Variant> input, opcua::Span<opcua::Variant> output) {
+            const auto& reason = input.at(0).scalar<opcua::String>();
+            output.at(0) = std::string{"reset accepted: "}.append(reason);
+        },
+        {{"reason", {"en-US", "reset reason"}, opcua::DataTypeId::String, opcua::ValueRank::Scalar}},
+        {{"result", {"en-US", "reset result"}, opcua::DataTypeId::String, opcua::ValueRank::Scalar}}
+    );
 
     bool running_server = true;
     std::thread server_thread([&] {
@@ -865,6 +1024,15 @@ void test_opcua_integration() {
     assert(!bad_write.ok);
     assert(bad_write.error_code == "INVALID_VALUE_TYPE");
 
+    MethodConfig reset_method;
+    reset_method.name = "reset_trip";
+    reset_method.object_id = "ns=0;i=85";
+    reset_method.method_id = "ns=1;i=1000";
+    reset_method.input_types = {"String"};
+    const auto method_call = client.call_method(device, reset_method, Json::array({"test"}), runtime);
+    assert(method_call.ok);
+    assert(method_call.output_arguments.at(0).get<std::string>() == "reset accepted: test");
+
     const std::vector<const VariableConfig*> variables{&temperature_variable, &running_variable, &label_variable};
     const auto reads = client.read_nodes(device, variables, runtime);
     assert(reads.size() == 3);
@@ -896,6 +1064,7 @@ int main() {
     test_device_state_cache_single_device_refresh();
     test_stage3_security_health_and_operations();
     test_write_node_policy_and_audit();
+    test_runtime_management_and_method_call();
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
     test_opcua_integration();
 #endif

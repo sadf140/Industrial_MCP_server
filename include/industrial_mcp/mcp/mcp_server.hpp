@@ -57,11 +57,12 @@ private:
     std::unordered_map<std::string, PendingOperation> pending_operations_;
     unsigned long long operation_counter_ = 0;
 
-    Json list_tools() const;
+    Json list_tools(const Json& params = Json::object()) const;
     Json call_tool(const Json& params);
     Json gateway_health() const;
     Json device_health(const std::string& device_id);
     HttpResponse handle_http_request(const std::string& path) const;
+    void reset_runtime_after_config_change();
 };
 
 } // namespace industrial_mcp

@@ -180,8 +180,17 @@ get_server_health
 get_device_health(device_id=pump-1)
 refresh_device_state(device_id=pump-1)
 acknowledge_alarm(device_id=pump-1, alarm_id=<alarm_id>)
-clear_cached_alarm(device_id=pump-1, alarm_id=<alarm_id>)
-prepare_device_action(device_id=pump-1, action=stop)
+clear_cached_alarm(device_id=pump-1, variable=temperature)
+prepare_device_action(device_id=pump-1, action=call_device_method, method=reset_trip)
 confirm_device_action(operation_id=<operation_id>)
 cancel_device_action(operation_id=<operation_id>)
+call_device_method(device_id=pump-1, method=reset_trip, arguments=["maintenance"], operation_id=<operation_id>)
+add_device(device={...})
+remove_device(device_id=pump-2, force=true)
+enable_device(device_id=pump-2)
+disable_device(device_id=pump-2)
+reload_configuration
+update_alarm_rule(device_id=pump-1, variable=temperature, warn_max=80, alarm_max=95)
 ```
+
+默认 `viewer` 角色不会看到高风险和管理类工具。`config/config.opcua-sim.json` 显式授权 `operator` 使用 `write_node`、`call_device_method` 和两阶段确认工具，生产配置应按受控客户端和指定角色单独授权。

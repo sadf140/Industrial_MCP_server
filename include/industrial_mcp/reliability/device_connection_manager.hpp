@@ -90,7 +90,12 @@ public:
                                 const VariableConfig& variable,
                                 const Json& value,
                                 const OpcUaRuntimeConfig& runtime);
+    OpcUaMethodResult call_method(const DeviceConfig& device,
+                                  const MethodConfig& method,
+                                  const Json& arguments,
+                                  const OpcUaRuntimeConfig& runtime);
     DeviceConnectionHealth refresh_device(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime);
+    void reset();
 
 private:
     struct ManagedState {

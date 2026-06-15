@@ -66,10 +66,21 @@ int main(int argc, char** argv) {
         running.writeValue(opcua::Variant{true});
         auto label = objects.addVariable({1, "Pump1.Label"}, "Pump1.Label", writable_attributes());
         label.writeValue(opcua::Variant{std::string{"pump-alpha"}});
+        objects.addMethod(
+            {1, 1000},
+            "Pump1.ResetTrip",
+            [](opcua::Span<const opcua::Variant> input, opcua::Span<opcua::Variant> output) {
+                const auto& reason = input.at(0).scalar<opcua::String>();
+                output.at(0) = std::string{"reset accepted: "}.append(reason);
+            },
+            {{"reason", {"en-US", "reset reason"}, opcua::DataTypeId::String, opcua::ValueRank::Scalar}},
+            {{"result", {"en-US", "reset result"}, opcua::DataTypeId::String, opcua::ValueRank::Scalar}}
+        );
 
         std::cerr << "opcua-sim-server listening on opc.tcp://127.0.0.1:" << port << '\n'
                   << "nodes: ns=1;s=Pump1.Temperature, ns=1;s=Pump1.Current, "
-                  << "ns=1;s=Pump1.Running, ns=1;s=Pump1.Label\n";
+                  << "ns=1;s=Pump1.Running, ns=1;s=Pump1.Label\n"
+                  << "method: object=ns=0;i=85, method=ns=1;i=1000 (Pump1.ResetTrip)\n";
 
         while (g_running) {
             server.runIterate();

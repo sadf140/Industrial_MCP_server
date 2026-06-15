@@ -23,6 +23,10 @@ public:
                                         const VariableConfig& variable,
                                         const Json& value,
                                         const OpcUaRuntimeConfig& runtime) = 0;
+    virtual OpcUaMethodResult call_method(const DeviceConfig& device,
+                                          const MethodConfig& method,
+                                          const Json& arguments,
+                                          const OpcUaRuntimeConfig& runtime) = 0;
     virtual DeviceStatus get_status(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime) = 0;
 };
 
@@ -39,6 +43,10 @@ public:
                                 const VariableConfig& variable,
                                 const Json& value,
                                 const OpcUaRuntimeConfig& runtime) override;
+    OpcUaMethodResult call_method(const DeviceConfig& device,
+                                  const MethodConfig& method,
+                                  const Json& arguments,
+                                  const OpcUaRuntimeConfig& runtime) override;
     DeviceStatus get_status(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime) override;
 
 private:
@@ -58,6 +66,10 @@ public:
                                 const VariableConfig& variable,
                                 const Json& value,
                                 const OpcUaRuntimeConfig& runtime) override;
+    OpcUaMethodResult call_method(const DeviceConfig& device,
+                                  const MethodConfig& method,
+                                  const Json& arguments,
+                                  const OpcUaRuntimeConfig& runtime) override;
     DeviceStatus get_status(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime) override;
 };
 

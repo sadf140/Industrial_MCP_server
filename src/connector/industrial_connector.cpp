@@ -38,6 +38,13 @@ OpcUaWriteResult OpcUaConnector::write_node(const DeviceConfig& device,
     return client_.write_node(device, variable, value, runtime);
 }
 
+OpcUaMethodResult OpcUaConnector::call_method(const DeviceConfig& device,
+                                              const MethodConfig& method,
+                                              const Json& arguments,
+                                              const OpcUaRuntimeConfig& runtime) {
+    return client_.call_method(device, method, arguments, runtime);
+}
+
 DeviceStatus OpcUaConnector::get_status(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime) {
     return client_.get_status(device, runtime);
 }
@@ -100,6 +107,33 @@ OpcUaWriteResult MockConnector::write_node(const DeviceConfig& device,
     result.quality = "Good";
     result.status_code = "Good";
     result.attempts = 1;
+    result.latency_ms = elapsed_ms_since(started);
+    return result;
+}
+
+OpcUaMethodResult MockConnector::call_method(const DeviceConfig& device,
+                                             const MethodConfig& method,
+                                             const Json& arguments,
+                                             const OpcUaRuntimeConfig& runtime) {
+    (void)device;
+    (void)arguments;
+    (void)runtime;
+    const auto started = std::chrono::steady_clock::now();
+    OpcUaMethodResult result;
+    result.timestamp = now_utc_iso8601();
+    result.attempts = 1;
+    if (!method.enabled) {
+        result.quality = "BadMethodInvalid";
+        result.status_code = "BadMethodInvalid";
+        result.error = "method is disabled: " + method.name;
+        result.error_code = "METHOD_DISABLED";
+        result.latency_ms = elapsed_ms_since(started);
+        return result;
+    }
+    result.ok = true;
+    result.output_arguments = method.mock_result.is_null() ? Json::array() : method.mock_result;
+    result.quality = "Good";
+    result.status_code = "Good";
     result.latency_ms = elapsed_ms_since(started);
     return result;
 }

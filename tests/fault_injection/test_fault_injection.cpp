@@ -13,7 +13,7 @@ AppConfig make_fault_config() {
     return ConfigLoader::load_json(Json::parse(R"({
         "server":{"name":"industrial-mcp-server","read_only":false},
         "http":{"host":"127.0.0.1","port":0},
-        "security":{"enabled":true,"default_role":"operator"},
+        "security":{"enabled":true,"default_role":"administrator"},
         "opcua":{"write_enabled":true},
         "reliability":{"max_retry_count":0,"circuit_failure_threshold":1,"circuit_cooldown_ms":0},
         "cache":{"enabled":false},

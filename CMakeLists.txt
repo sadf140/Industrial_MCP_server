@@ -26,6 +26,7 @@ if(INDUSTRIAL_MCP_WITH_OPCUA)
     set(UA_BUILD_FUZZING OFF CACHE BOOL "Build open62541 fuzzing targets" FORCE)
     set(UA_BUILD_OSS_FUZZ OFF CACHE BOOL "Build open62541 OSS-Fuzz targets" FORCE)
     set(UA_BUILD_FUZZING_CORPUS OFF CACHE BOOL "Build open62541 fuzzing corpus" FORCE)
+    set(UA_ENABLE_METHODCALLS ON CACHE BOOL "Enable open62541 Method service set" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 
     if(WIN32 AND MINGW AND DEFINED ENV{SHELL})

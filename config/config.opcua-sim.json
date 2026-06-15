@@ -26,7 +26,51 @@
   },
   "security": {
     "enabled": true,
-    "default_role": "operator"
+    "default_role": "operator",
+    "hide_unauthorized_tools": true,
+    "roles": {
+      "viewer": [
+        "get_gateway_health",
+        "get_server_health",
+        "list_devices",
+        "get_device_state",
+        "get_device_health",
+        "get_alarm_history",
+        "query_alarm_logs",
+        "analyze_alarms",
+        "diagnose_fault",
+        "get_network_status",
+        "read_node",
+        "read_opcua_node",
+        "read_device_snapshot",
+        "get_device_status"
+      ],
+      "operator": [
+        "get_gateway_health",
+        "get_server_health",
+        "list_devices",
+        "get_device_state",
+        "get_device_health",
+        "get_alarm_history",
+        "query_alarm_logs",
+        "analyze_alarms",
+        "diagnose_fault",
+        "get_network_status",
+        "read_node",
+        "read_opcua_node",
+        "read_device_snapshot",
+        "get_device_status",
+        "refresh_device_state",
+        "acknowledge_alarm",
+        "clear_cached_alarm",
+        "prepare_device_action",
+        "confirm_device_action",
+        "cancel_device_action",
+        "write_node",
+        "call_device_method"
+      ],
+      "administrator": ["*"]
+    }
   },
   "timeouts": {
     "mcp_request_ms": 5000,
@@ -99,6 +143,18 @@
           "unit": "",
           "description": "simulated equipment label",
           "writable": true
+        }
+      ],
+      "methods": [
+        {
+          "name": "reset_trip",
+          "object_id": "ns=0;i=85",
+          "method_id": "ns=1;i=1000",
+          "description": "safe reset trip method exposed by opcua-sim-server",
+          "enabled": true,
+          "requires_confirmation": true,
+          "input_types": ["String"],
+          "mock_result": ["reset accepted"]
         }
       ]
     }

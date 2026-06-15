@@ -55,6 +55,26 @@ OpcUaWriteResult circuit_open_write_result(const DeviceConfig& device, const Var
     return result;
 }
 
+OpcUaMethodResult disabled_method_result(const DeviceConfig& device) {
+    OpcUaMethodResult result;
+    result.timestamp = now_utc_iso8601();
+    result.quality = "BadDeviceDisabled";
+    result.status_code = "BadDeviceDisabled";
+    result.error = "device is disabled: " + device.id;
+    result.error_code = "DEVICE_DISABLED";
+    return result;
+}
+
+OpcUaMethodResult circuit_open_method_result(const DeviceConfig& device) {
+    OpcUaMethodResult result;
+    result.timestamp = now_utc_iso8601();
+    result.quality = "CircuitOpen";
+    result.status_code = "CircuitOpen";
+    result.error = "circuit breaker is open for device: " + device.id;
+    result.error_code = "DEVICE_OFFLINE";
+    return result;
+}
+
 bool any_read_ok(const std::vector<OpcUaReadResult>& reads) {
     return std::any_of(reads.begin(), reads.end(), [](const auto& read) {
         return read.ok;
@@ -134,7 +154,14 @@ CircuitState CircuitBreaker::state() const {
 
 DeviceConnectionManager::DeviceConnectionManager(const AppConfig& config)
     : config_(config), retry_policy_(config.reliability) {
+    reset();
+}
+
+void DeviceConnectionManager::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
+    retry_policy_ = RetryPolicy(config_.reliability);
+    states_.clear();
+    connectors_.clear();
     for (const auto& device : config_.devices) {
         auto& state = states_[device.id];
         state.connection_state = device.enabled ? DeviceConnectionState::Disconnected : DeviceConnectionState::Disabled;
@@ -411,6 +438,42 @@ OpcUaWriteResult DeviceConnectionManager::write_node(const DeviceConfig& device,
         record_failure(device, write.error, write.attempts, write.latency_ms);
     }
     return write;
+}
+
+OpcUaMethodResult DeviceConnectionManager::call_method(const DeviceConfig& device,
+                                                       const MethodConfig& method,
+                                                       const Json& arguments,
+                                                       const OpcUaRuntimeConfig& runtime) {
+    if (!device.enabled) return disabled_method_result(device);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& state = state_for_locked(device);
+        if (!request_allowed_locked(state)) {
+            state.connection_state = DeviceConnectionState::Faulted;
+            state.online = false;
+            return circuit_open_method_result(device);
+        }
+    }
+
+    auto* connector = connector_for(device);
+    if (connector == nullptr) {
+        auto result = circuit_open_method_result(device);
+        result.status_code = "ConnectorNotFound";
+        result.quality = "ConnectorNotFound";
+        result.error = "connector is not configured for device: " + device.id;
+        result.error_code = "DEVICE_OFFLINE";
+        record_failure(device, result.error, 0, -1);
+        return result;
+    }
+
+    mark_connecting(device);
+    const auto call = connector->call_method(device, method, arguments, runtime);
+    if (call.ok) {
+        record_success(device, call.attempts, call.latency_ms);
+    } else {
+        record_failure(device, call.error, call.attempts, call.latency_ms);
+    }
+    return call;
 }
 
 DeviceConnectionHealth DeviceConnectionManager::refresh_device(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime) {

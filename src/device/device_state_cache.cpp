@@ -275,6 +275,12 @@ bool DeviceStateCache::clear_cached_alarm(const std::string& device_id, const st
     return true;
 }
 
+void DeviceStateCache::reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    states_.clear();
+    active_alarm_signatures_.clear();
+}
+
 Json DeviceStateCache::state_json(const std::string& device_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     Json out = Json::object();

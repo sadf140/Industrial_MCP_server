@@ -8,6 +8,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <chrono>
 #include <cmath>
@@ -16,6 +17,7 @@
 #include <sstream>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace industrial_mcp {
 namespace {
@@ -469,6 +471,135 @@ OpcUaWriteResult OpcUaClient::write_node(const DeviceConfig& device,
     result.status_code = "BadNotConnected";
     result.error = "OPC UA live writes are not compiled; rebuild with OPC UA support";
     result.error_code = "OPCUA_WRITE_FAILED";
+#endif
+
+    result.latency_ms = elapsed_ms_since(started);
+    update_stats(device.id, result.ok, result.latency_ms, result.error);
+    return result;
+}
+
+OpcUaMethodResult OpcUaClient::call_method(const DeviceConfig& device,
+                                           const MethodConfig& method,
+                                           const Json& arguments,
+                                           const OpcUaRuntimeConfig& runtime) {
+    const auto started = std::chrono::steady_clock::now();
+    OpcUaMethodResult result;
+    result.timestamp = now_utc_iso8601();
+
+    if (!method.enabled) {
+        result.quality = "BadMethodInvalid";
+        result.status_code = "BadMethodInvalid";
+        result.error = "method is disabled: " + method.name;
+        result.error_code = "METHOD_DISABLED";
+        result.latency_ms = elapsed_ms_since(started);
+        return result;
+    }
+    if (!arguments.is_array()) {
+        result.quality = "BadInvalidArgument";
+        result.status_code = "BadInvalidArgument";
+        result.error = "call_device_method arguments must be an array";
+        result.error_code = "INVALID_ARGUMENT";
+        result.latency_ms = elapsed_ms_since(started);
+        return result;
+    }
+    if (arguments.size() != method.input_types.size()) {
+        result.quality = "BadArgumentsMissing";
+        result.status_code = "BadArgumentsMissing";
+        result.error = "method argument count does not match configured input_types";
+        result.error_code = "INVALID_ARGUMENT";
+        result.latency_ms = elapsed_ms_since(started);
+        return result;
+    }
+
+    if (starts_with(device.endpoint, "mock://")) {
+        result.ok = true;
+        result.output_arguments = method.mock_result.is_null() ? Json::array() : method.mock_result;
+        result.quality = "Good";
+        result.status_code = "Good";
+        result.attempts = 1;
+        result.latency_ms = elapsed_ms_since(started);
+        update_stats(device.id, true, result.latency_ms, {});
+        return result;
+    }
+
+#if defined(INDUSTRIAL_MCP_WITH_OPCUA) && defined(UA_ENABLE_METHODCALLS)
+    std::vector<opcua::Variant> input_arguments;
+    input_arguments.reserve(method.input_types.size());
+    for (std::size_t index = 0; index < method.input_types.size(); ++index) {
+        opcua::Variant variant;
+        if (!make_write_variant(arguments.at(index), method.input_types.at(index), variant, result.error)) {
+            result.quality = "BadTypeMismatch";
+            result.status_code = "BadTypeMismatch";
+            result.error_code = "INVALID_ARGUMENT";
+            result.latency_ms = elapsed_ms_since(started);
+            return result;
+        }
+        input_arguments.push_back(std::move(variant));
+    }
+
+    for (int attempt = 1; attempt <= attempts_for(runtime); ++attempt) {
+        try {
+            opcua::Client client = make_client(runtime);
+            client.connect(device.endpoint);
+
+            opcua::Node object_node{client, opcua::NodeId::parse(method.object_id)};
+            const auto call = object_node.callMethod(opcua::NodeId::parse(method.method_id), input_arguments);
+            const auto status = call.statusCode();
+            result.status_code = std::string(status.name());
+            result.quality = result.status_code;
+            result.attempts = attempt;
+            result.ok = status.isGood();
+            if (!result.ok) {
+                result.error = "OPC UA method call failed: " + result.status_code;
+                result.error_code = "OPCUA_METHOD_FAILED";
+            } else {
+                result.output_arguments = Json::array();
+                for (const auto& output : call.outputArguments()) {
+                    std::string data_type;
+                    std::string conversion_error;
+                    result.output_arguments.push_back(variant_to_json(output, data_type, conversion_error));
+                    if (!conversion_error.empty()) {
+                        result.ok = false;
+                        result.error = conversion_error;
+                        result.error_code = "OPCUA_METHOD_FAILED";
+                        result.quality = "BadDataTypeUnsupported";
+                        result.status_code = result.quality;
+                        break;
+                    }
+                }
+            }
+
+            client.disconnect();
+            break;
+        } catch (const opcua::BadStatus& ex) {
+            result.quality = status_name(ex);
+            result.status_code = result.quality;
+            result.error = ex.what();
+            result.error_code = "OPCUA_METHOD_FAILED";
+            result.attempts = attempt;
+        } catch (const std::exception& ex) {
+            result.quality = "BadUnexpectedError";
+            result.status_code = "BadUnexpectedError";
+            result.error = ex.what();
+            result.error_code = "OPCUA_METHOD_FAILED";
+            result.attempts = attempt;
+        }
+        if (attempt < attempts_for(runtime)) {
+            retry_delay(runtime);
+        }
+    }
+#elif defined(INDUSTRIAL_MCP_WITH_OPCUA)
+    (void)runtime;
+    result.quality = "BadNotSupported";
+    result.status_code = "BadNotSupported";
+    result.error = "OPC UA method calls are not enabled in the bundled open62541 build";
+    result.error_code = "OPCUA_METHOD_FAILED";
+#else
+    (void)runtime;
+    result.quality = "BadNotConnected";
+    result.status_code = "BadNotConnected";
+    result.error = "OPC UA live method calls are not compiled; rebuild with OPC UA support";
+    result.error_code = "OPCUA_METHOD_FAILED";
 #endif
 
     result.latency_ms = elapsed_ms_since(started);

@@ -23,11 +23,13 @@ void test_config_and_metrics() {
         "http":{"host":"127.0.0.1","port":0},
         "observability":{"metrics_enabled":true,"metrics_port":0},
         "storage":{"type":"jsonl"},
-        "devices":[{"id":"pump-1","endpoint":"mock://pump-1","variables":[{"name":"temperature","node_id":"ns=2;s=T","data_type":"Double","mock_value":42.0}]}]
+        "devices":[{"id":"pump-1","endpoint":"mock://pump-1","variables":[{"name":"temperature","node_id":"ns=2;s=T","data_type":"Double","mock_value":42.0}],
+            "methods":[{"name":"reset_trip","object_id":"ns=0;i=85","method_id":"ns=1;i=1000","input_types":["String"],"mock_result":["ok"]}]}]
     })"), ".");
     assert(config.http.port == 0);
     assert(config.observability.metrics_enabled);
     assert(find_device(config, "pump-1") != nullptr);
+    assert(find_method(*find_device(config, "pump-1"), "reset_trip") != nullptr);
 
     ObservabilityMetrics metrics;
     metrics.record_tool_call("read_node", true, 12);

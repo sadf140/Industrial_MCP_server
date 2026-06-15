@@ -166,6 +166,27 @@ CMake 检测到 SQLite3 时会定义 `INDUSTRIAL_MCP_WITH_SQLITE=1` 并启用 SQ
 - 变量配置 `writable=true`
 - 写入值满足 `data_type`、`min`、`max`、`allowed_values`
 
+`call_device_method` 只允许调用设备配置中的方法白名单：
+
+```json
+{
+  "methods": [
+    {
+      "name": "reset_trip",
+      "object_id": "ns=0;i=85",
+      "method_id": "ns=1;i=1000",
+      "enabled": true,
+      "requires_confirmation": true,
+      "input_types": ["String"]
+    }
+  ]
+}
+```
+
+当 `requires_confirmation=true` 时，需要先调用 `prepare_device_action` 和 `confirm_device_action`，再把 `operation_id` 传给 `call_device_method`。
+
+运行期管理工具包括 `add_device`、`remove_device`、`enable_device`、`disable_device`、`reload_configuration`、`update_alarm_rule`。这些工具只修改当前进程内配置并写审计，不写回 JSON 配置文件；服务重启后恢复配置文件状态。
+
 ## 可靠性
 
 配置：

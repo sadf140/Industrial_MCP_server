@@ -50,6 +50,18 @@ struct OpcUaWriteResult {
     long long latency_ms = -1;
 };
 
+struct OpcUaMethodResult {
+    bool ok = false;
+    Json output_arguments = Json::array();
+    std::string timestamp;
+    std::string quality;
+    std::string status_code;
+    std::string error;
+    std::string error_code;
+    int attempts = 0;
+    long long latency_ms = -1;
+};
+
 class OpcUaClient {
 public:
     OpcUaReadResult read_node(const DeviceConfig& device,
@@ -63,6 +75,10 @@ public:
                                 const VariableConfig& variable,
                                 const Json& value,
                                 const OpcUaRuntimeConfig& runtime);
+    OpcUaMethodResult call_method(const DeviceConfig& device,
+                                  const MethodConfig& method,
+                                  const Json& arguments,
+                                  const OpcUaRuntimeConfig& runtime);
     DeviceStatus get_status(const DeviceConfig& device, const OpcUaRuntimeConfig& runtime);
 
 private:
