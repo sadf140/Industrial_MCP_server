@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -10,6 +12,13 @@ namespace industrial_mcp {
 namespace {
 
 constexpr const char* kProtocolVersion = "2024-11-05";
+
+enum class ToolRiskLevel {
+    ReadOnly,
+    LowRiskWrite,
+    HighRiskWrite,
+    Administrative,
+};
 
 bool is_notification(const Json& request) {
     return request.is_object() && !request.contains("id");
@@ -61,6 +70,20 @@ Json tool_error(const std::string& code, const std::string& message) {
     return tool_result({{"error", code}, {"message", message}}, true);
 }
 
+std::string risk_to_string(ToolRiskLevel risk) {
+    switch (risk) {
+        case ToolRiskLevel::ReadOnly:
+            return "ReadOnly";
+        case ToolRiskLevel::LowRiskWrite:
+            return "LowRiskWrite";
+        case ToolRiskLevel::HighRiskWrite:
+            return "HighRiskWrite";
+        case ToolRiskLevel::Administrative:
+            return "Administrative";
+    }
+    return "ReadOnly";
+}
+
 bool opcua_compiled() {
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
     return true;
@@ -79,6 +102,13 @@ std::string required_arg_string(const Json& args, const std::string& key) {
 std::string optional_arg_string(const Json& args, const std::string& key) {
     if (args.is_object() && args.contains(key) && args.at(key).is_string()) {
         return args.at(key).get<std::string>();
+    }
+    return {};
+}
+
+std::string optional_object_string(const Json& object, const std::string& key) {
+    if (object.is_object() && object.contains(key) && object.at(key).is_string()) {
+        return object.at(key).get<std::string>();
     }
     return {};
 }
@@ -168,6 +198,9 @@ Json variable_to_json(const VariableConfig& variable) {
     if (variable.warn_max) out["warn_max"] = *variable.warn_max;
     if (variable.alarm_min) out["alarm_min"] = *variable.alarm_min;
     if (variable.alarm_max) out["alarm_max"] = *variable.alarm_max;
+    if (variable.write_min) out["min"] = *variable.write_min;
+    if (variable.write_max) out["max"] = *variable.write_max;
+    if (!variable.allowed_values.empty()) out["allowed_values"] = variable.allowed_values;
     return out;
 }
 
@@ -175,13 +208,14 @@ Json tool(const std::string& name,
           const std::string& description,
           Json input_schema,
           Json output_schema,
-          bool read_only = true) {
+          bool read_only = true,
+          ToolRiskLevel risk = ToolRiskLevel::ReadOnly) {
     return {
         {"name", name},
         {"description", description},
         {"inputSchema", std::move(input_schema)},
         {"outputSchema", std::move(output_schema)},
-        {"annotations", {{"readOnlyHint", read_only}}},
+        {"annotations", {{"readOnlyHint", read_only}, {"riskLevel", risk_to_string(risk)}}},
     };
 }
 
@@ -202,6 +236,47 @@ Json device_id_input_schema() {
 
 Json optional_device_id_input_schema() {
     return object_schema({{"device_id", schema_string("Optional configured device id.")}});
+}
+
+Json refresh_device_state_input_schema() {
+    return object_schema({{"device_id", schema_string("Optional configured device id.")}});
+}
+
+Json acknowledge_alarm_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"alarm_id", schema_string("Alarm id to acknowledge.")},
+            {"message", schema_string("Optional acknowledgement message.")},
+        },
+        Json::array({"device_id"})
+    );
+}
+
+Json clear_cached_alarm_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"variable", schema_string("Optional variable name. Empty clears device communication alarm state.")},
+        },
+        Json::array({"device_id"})
+    );
+}
+
+Json prepare_device_action_input_schema() {
+    return object_schema(
+        {
+            {"device_id", schema_string("Configured device id.")},
+            {"action", schema_string("Action name, for example write_node or stop.")},
+            {"variable", schema_string("Optional variable for write actions.")},
+            {"value", schema_value("Optional value for write actions.")},
+        },
+        Json::array({"device_id", "action"})
+    );
+}
+
+Json operation_id_input_schema() {
+    return object_schema({{"operation_id", schema_string("Prepared operation id.")}}, Json::array({"operation_id"}));
 }
 
 Json write_node_input_schema() {
@@ -275,7 +350,135 @@ std::string tool_error_code(const Json& result) {
 }
 
 bool tool_call_read_only(const std::string& tool_name) {
-    return tool_name != "write_node";
+    return tool_name != "write_node" &&
+           tool_name != "acknowledge_alarm" &&
+           tool_name != "clear_cached_alarm" &&
+           tool_name != "refresh_device_state" &&
+           tool_name != "prepare_device_action" &&
+           tool_name != "confirm_device_action" &&
+           tool_name != "cancel_device_action";
+}
+
+ToolRiskLevel tool_risk(const std::string& tool_name) {
+    if (tool_name == "write_node" || tool_name == "prepare_device_action" || tool_name == "confirm_device_action") {
+        return ToolRiskLevel::HighRiskWrite;
+    }
+    if (tool_name == "acknowledge_alarm" || tool_name == "clear_cached_alarm" || tool_name == "refresh_device_state" || tool_name == "cancel_device_action") {
+        return ToolRiskLevel::LowRiskWrite;
+    }
+    return ToolRiskLevel::ReadOnly;
+}
+
+bool has_tool_permission(const AppConfig& config, const std::string& role, const std::string& tool_name) {
+    if (!config.security.enabled) return true;
+    const auto found = config.security.roles.find(role.empty() ? config.security.default_role : role);
+    if (found == config.security.roles.end()) return false;
+    return std::find(found->second.begin(), found->second.end(), "*") != found->second.end() ||
+           std::find(found->second.begin(), found->second.end(), tool_name) != found->second.end();
+}
+
+bool is_known_tool(const std::string& tool_name) {
+    static const std::set<std::string> tools = {
+        "get_gateway_health",
+        "get_server_health",
+        "read_node",
+        "read_opcua_node",
+        "write_node",
+        "list_devices",
+        "read_device_snapshot",
+        "get_device_state",
+        "refresh_device_state",
+        "get_device_health",
+        "get_device_status",
+        "get_network_status",
+        "get_alarm_history",
+        "query_alarm_logs",
+        "analyze_alarms",
+        "acknowledge_alarm",
+        "clear_cached_alarm",
+        "prepare_device_action",
+        "confirm_device_action",
+        "cancel_device_action",
+        "diagnose_fault",
+    };
+    return tools.find(tool_name) != tools.end();
+}
+
+std::string call_context_string(const Json& params, const Json& args, const std::string& key, const std::string& fallback) {
+    if (params.is_object()) {
+        if (params.contains(key) && params.at(key).is_string()) return params.at(key).get<std::string>();
+        for (const auto& context_key : {"context", "_meta"}) {
+            if (params.contains(context_key) && params.at(context_key).is_object()) {
+                const auto value = optional_object_string(params.at(context_key), key);
+                if (!value.empty()) return value;
+            }
+        }
+    }
+    const auto value = optional_arg_string(args, key);
+    return value.empty() ? fallback : value;
+}
+
+std::string request_id_string(const Json& id) {
+    if (id.is_string()) return id.get<std::string>();
+    if (id.is_number_integer()) return std::to_string(id.get<long long>());
+    if (id.is_number_unsigned()) return std::to_string(id.get<unsigned long long>());
+    if (id.is_null()) return {};
+    return id.dump();
+}
+
+void refresh_content_text(Json& result) {
+    if (!result.is_object() || !result.contains("structuredContent")) return;
+    if (!result.contains("content") || !result.at("content").is_array() || result.at("content").empty()) return;
+    result["content"][0]["text"] = result.at("structuredContent").dump();
+}
+
+Json add_execution_context(Json result,
+                           const std::string& request_id,
+                           const std::string& tool_name,
+                           long long elapsed_ms,
+                           const std::string& data_source) {
+    if (result.is_object() && result.contains("structuredContent") && result.at("structuredContent").is_object()) {
+        auto& content = result["structuredContent"];
+        content["request_id"] = request_id;
+        content["tool_name"] = tool_name;
+        content["duration_ms"] = elapsed_ms;
+        content["data_source"] = data_source;
+        if (!content.contains("cache")) {
+            content["cache"] = Json::object();
+        }
+        refresh_content_text(result);
+    }
+    return result;
+}
+
+std::string data_source_for_tool(const std::string& tool_name) {
+    if (tool_name == "get_device_state" || tool_name == "diagnose_fault") return "cache";
+    if (tool_name == "list_devices" || tool_name == "get_gateway_health" || tool_name == "get_server_health") return "configuration";
+    if (tool_name == "get_alarm_history" || tool_name == "query_alarm_logs" || tool_name == "analyze_alarms" || tool_name == "acknowledge_alarm") return "alarm_store";
+    if (tool_name == "read_node" || tool_name == "read_opcua_node" || tool_name == "read_device_snapshot" || tool_name == "write_node" || tool_name == "get_device_status" || tool_name == "get_network_status") return "opcua";
+    return "server";
+}
+
+bool json_values_equal(const Json& lhs, const Json& rhs) {
+    return lhs == rhs;
+}
+
+std::string validate_write_constraints(const VariableConfig& variable, const Json& value) {
+    if (!variable.allowed_values.empty()) {
+        const bool allowed = std::any_of(variable.allowed_values.begin(), variable.allowed_values.end(), [&](const Json& allowed_value) {
+            return json_values_equal(allowed_value, value);
+        });
+        if (!allowed) return "value is not in allowed_values for variable: " + variable.name;
+    }
+    if ((variable.write_min || variable.write_max) && !value.is_number()) {
+        return "numeric value is required for min/max constrained variable: " + variable.name;
+    }
+    if (value.is_number()) {
+        const auto parsed = value.get<double>();
+        if (variable.write_min && parsed < *variable.write_min) return "value is below configured min for variable: " + variable.name;
+        if (variable.write_max && parsed > *variable.write_max) return "value is above configured max for variable: " + variable.name;
+    }
+    return {};
 }
 
 } // namespace
@@ -327,7 +530,7 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
         const auto method = required_arg_string(request, "method");
 
         if (notification) {
-            if (method == "notifications/initialized") {
+            if (method == "notifications/initialized" || method == "notifications/tools/list_changed") {
                 return std::nullopt;
             }
             return std::nullopt;
@@ -357,24 +560,31 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
             }
             const auto& params = request.at("params");
             const auto started = std::chrono::steady_clock::now();
-            Json result = call_tool(params);
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started
-            ).count();
-
             const std::string tool_name = params.is_object() && params.contains("name") && params.at("name").is_string()
                 ? params.at("name").get<std::string>()
                 : "";
             const Json args = params.is_object() && params.contains("arguments") ? params.at("arguments") : Json::object();
-            audit_.record_tool_call(
-                tool_name,
-                optional_device_id(args),
-                tool_result_ok(result),
-                elapsed,
-                tool_error_code(result),
-                args,
-                tool_call_read_only(tool_name)
-            );
+            const auto request_id = request_id_string(id);
+            Json result = call_tool(params);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started
+            ).count();
+            result = add_execution_context(std::move(result), request_id, tool_name, elapsed, data_source_for_tool(tool_name));
+
+            AuditRecord audit_record;
+            audit_record.request_id = request_id;
+            audit_record.user_id = call_context_string(params, args, "user_id", "anonymous");
+            audit_record.client_id = call_context_string(params, args, "client_id", "mcp-client");
+            audit_record.tool_name = tool_name;
+            audit_record.device_id = optional_device_id(args);
+            audit_record.target_node = optional_arg_string(args, "variable");
+            audit_record.result = tool_result_ok(result) ? "ok" : "error";
+            audit_record.elapsed_ms = elapsed;
+            audit_record.error_code = tool_error_code(result);
+            audit_record.arguments = args;
+            audit_record.read_only = tool_call_read_only(tool_name);
+            if (args.is_object() && args.contains("value")) audit_record.new_value = args.at("value");
+            audit_.record(audit_record);
             return make_response(id, result);
         }
 
@@ -387,17 +597,25 @@ std::optional<Json> McpServer::handle_message(const Json& request) {
 Json McpServer::list_tools() const {
     Json tools = Json::array();
     tools.push_back(tool("get_gateway_health", "Return read-only gateway health, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
+    tools.push_back(tool("get_server_health", "Return MCP server health, readiness, configuration, and runtime metadata.", object_schema(Json::object()), generic_output_schema()));
     tools.push_back(tool("read_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
     tools.push_back(tool("read_opcua_node", "Read one configured OPC UA node or variable from a device.", read_node_input_schema(), generic_output_schema()));
-    tools.push_back(tool("write_node", "Write one whitelisted configured OPC UA variable. Disabled unless server and config explicitly allow writes.", write_node_input_schema(), generic_output_schema(), false));
+    tools.push_back(tool("write_node", "Write one whitelisted configured OPC UA variable. Disabled unless server, RBAC, and config explicitly allow writes.", write_node_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
     tools.push_back(tool("list_devices", "List configured industrial devices and their OPC UA variables without opening network sessions.", object_schema(Json::object()), generic_output_schema()));
     tools.push_back(tool("read_device_snapshot", "Read all configured variables for a device.", device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_device_state", "Return cached device state collected by the gateway without directly reading OPC UA for this call.", optional_device_id_input_schema(), generic_output_schema()));
+    tools.push_back(tool("refresh_device_state", "Force a cache refresh and return cached device state.", refresh_device_state_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    tools.push_back(tool("get_device_health", "Return one configured device health, communication status, and cache state.", device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_device_status", "Return read-only device and OPC UA session status.", device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_network_status", "Return per-device OPC UA communication status, latency, and disconnect counters.", optional_device_id_input_schema(), generic_output_schema()));
     tools.push_back(tool("get_alarm_history", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
     tools.push_back(tool("query_alarm_logs", "Query alarm log records by device, time range, severity, or keyword.", alarm_query_input_schema(), generic_output_schema()));
     tools.push_back(tool("analyze_alarms", "Summarize alarm counts, frequent codes, and timeline.", alarm_query_input_schema(), generic_output_schema()));
+    tools.push_back(tool("acknowledge_alarm", "Append an alarm acknowledgement record.", acknowledge_alarm_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    tools.push_back(tool("clear_cached_alarm", "Clear in-memory duplicate-suppression state for one cached alarm.", clear_cached_alarm_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
+    tools.push_back(tool("prepare_device_action", "Prepare a high-risk device operation and return a short-lived operation_id.", prepare_device_action_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
+    tools.push_back(tool("confirm_device_action", "Confirm a prepared high-risk device operation.", operation_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::HighRiskWrite));
+    tools.push_back(tool("cancel_device_action", "Cancel a prepared high-risk device operation.", operation_id_input_schema(), generic_output_schema(), false, ToolRiskLevel::LowRiskWrite));
     tools.push_back(tool("diagnose_fault", "Run rule-based fault diagnosis with evidence and limitations.", diagnose_input_schema(), generic_output_schema()));
     return {{"tools", tools}};
 }
@@ -405,16 +623,29 @@ Json McpServer::list_tools() const {
 Json McpServer::call_tool(const Json& params) {
     const auto name = required_arg_string(params, "name");
     const Json args = params.contains("arguments") ? params.at("arguments") : Json::object();
+    if (!is_known_tool(name)) {
+        return tool_error("UNKNOWN_TOOL", "unknown tool: " + name);
+    }
+    const auto role = call_context_string(params, args, "role", config_.security.default_role);
+    if (!has_tool_permission(config_, role, name)) {
+        return tool_error("PERMISSION_DENIED", "role is not allowed to call tool: " + role + " -> " + name);
+    }
 
     try {
-        if (name == "get_gateway_health") {
+        if (name == "get_gateway_health" || name == "get_server_health") {
             return tool_result(gateway_health());
+        }
+
+        if (name == "get_device_health") {
+            const auto device_id = required_arg_string(args, "device_id");
+            return tool_result(device_health(device_id));
         }
 
         if (name == "get_device_status") {
             const auto device_id = required_arg_string(args, "device_id");
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
             return tool_result(status_to_json(opcua_.get_status(*device, config_.opcua)));
         }
 
@@ -428,6 +659,8 @@ Json McpServer::call_tool(const Json& params) {
                 devices.push_back({
                     {"id", device.id},
                     {"name", device.name},
+                    {"protocol", device.protocol},
+                    {"enabled", device.enabled},
                     {"endpoint", device.endpoint},
                     {"endpoint_type", device.endpoint.rfind("mock://", 0) == 0 ? "mock" : "opcua"},
                     {"variable_count", static_cast<int>(device.variables.size())},
@@ -447,6 +680,7 @@ Json McpServer::call_tool(const Json& params) {
             if (!device_id.empty()) {
                 const auto* device = find_device(config_, device_id);
                 if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+                if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
                 devices.push_back(status_to_json(opcua_.get_status(*device, config_.opcua)));
             } else {
                 for (const auto& device : config_.devices) {
@@ -465,10 +699,112 @@ Json McpServer::call_tool(const Json& params) {
             return tool_result(state_cache_.state_json(optional_arg_string(args, "device_id")));
         }
 
+        if (name == "refresh_device_state") {
+            state_cache_.refresh_once();
+            return tool_result(state_cache_.state_json(optional_arg_string(args, "device_id")));
+        }
+
+        if (name == "acknowledge_alarm") {
+            const auto device_id = required_arg_string(args, "device_id");
+            const auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            const auto alarm_id = optional_arg_string(args, "alarm_id");
+            const auto user_id = call_context_string(params, args, "user_id", "anonymous");
+            const auto ok = alarms_.acknowledge(alarm_id, device_id, user_id, optional_arg_string(args, "message"));
+            return tool_result({
+                {"ok", ok},
+                {"device_id", device_id},
+                {"alarm_id", alarm_id},
+                {"acknowledged_by", user_id},
+                {"read_only", false},
+            }, !ok);
+        }
+
+        if (name == "clear_cached_alarm") {
+            const auto device_id = required_arg_string(args, "device_id");
+            const auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            const auto variable = optional_arg_string(args, "variable");
+            const auto ok = state_cache_.clear_cached_alarm(device_id, variable);
+            return tool_result({
+                {"ok", ok},
+                {"device_id", device_id},
+                {"variable", variable},
+                {"read_only", false},
+            }, !ok);
+        }
+
+        if (name == "prepare_device_action") {
+            const auto device_id = required_arg_string(args, "device_id");
+            const auto action = required_arg_string(args, "action");
+            const auto* device = find_device(config_, device_id);
+            if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
+
+            PendingOperation operation;
+            {
+                std::lock_guard<std::mutex> lock(operations_mutex_);
+                ++operation_counter_;
+                std::ostringstream id;
+                id << "op-" << now_utc_iso8601() << "-" << operation_counter_;
+                operation.operation_id = id.str();
+            }
+            operation.user_id = call_context_string(params, args, "user_id", "anonymous");
+            operation.client_id = call_context_string(params, args, "client_id", "mcp-client");
+            operation.device_id = device_id;
+            operation.action = action;
+            operation.arguments = args;
+            operation.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            const auto operation_id = operation.operation_id;
+            {
+                std::lock_guard<std::mutex> lock(operations_mutex_);
+                pending_operations_[operation_id] = std::move(operation);
+            }
+            return tool_result({
+                {"operation_id", operation_id},
+                {"risk", "HIGH"},
+                {"description", "Prepared device action: " + action + " on " + device_id},
+                {"expires_in_seconds", 60},
+                {"requires_confirmation", true},
+                {"read_only", false},
+            });
+        }
+
+        if (name == "confirm_device_action") {
+            const auto operation_id = required_arg_string(args, "operation_id");
+            std::lock_guard<std::mutex> lock(operations_mutex_);
+            const auto found = pending_operations_.find(operation_id);
+            if (found == pending_operations_.end()) return tool_error("INVALID_ARGUMENT", "unknown operation_id: " + operation_id);
+            if (std::chrono::steady_clock::now() > found->second.expires_at) {
+                pending_operations_.erase(found);
+                return tool_error("EXECUTION_TIMEOUT", "operation_id has expired: " + operation_id);
+            }
+            found->second.confirmed = true;
+            return tool_result({
+                {"operation_id", operation_id},
+                {"confirmed", true},
+                {"executed", false},
+                {"message", "operation confirmed; no direct device control action is executed by this stage-3 skeleton"},
+                {"read_only", false},
+            });
+        }
+
+        if (name == "cancel_device_action") {
+            const auto operation_id = required_arg_string(args, "operation_id");
+            std::lock_guard<std::mutex> lock(operations_mutex_);
+            const auto erased = pending_operations_.erase(operation_id);
+            return tool_result({
+                {"operation_id", operation_id},
+                {"cancelled", erased > 0},
+                {"read_only", false},
+            });
+        }
+
         if (name == "read_node" || name == "read_opcua_node") {
             const auto device_id = required_arg_string(args, "device_id");
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
 
             const auto variable_name = optional_arg_string(args, "variable");
             const auto explicit_node_id = optional_arg_string(args, "node_id");
@@ -506,10 +842,15 @@ Json McpServer::call_tool(const Json& params) {
 
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
             const auto* variable = find_variable(*device, variable_name);
             if (variable == nullptr) return tool_error("VARIABLE_NOT_FOUND", "unknown variable: " + variable_name);
             if (!variable->writable) {
                 return tool_error("WRITE_NOT_ALLOWED", "variable is not marked writable in configuration: " + variable_name);
+            }
+            const auto constraint_error = validate_write_constraints(*variable, args.at("value"));
+            if (!constraint_error.empty()) {
+                return tool_error("INVALID_ARGUMENT", constraint_error);
             }
 
             const auto write = opcua_.write_node(*device, *variable, args.at("value"), config_.opcua);
@@ -530,6 +871,7 @@ Json McpServer::call_tool(const Json& params) {
             const auto device_id = required_arg_string(args, "device_id");
             const auto* device = find_device(config_, device_id);
             if (device == nullptr) return tool_error("DEVICE_NOT_FOUND", "unknown device_id: " + device_id);
+            if (!device->enabled) return tool_error("DEVICE_DISABLED", "device is disabled: " + device_id);
 
             Json variables = Json::array();
             std::vector<const VariableConfig*> variable_refs;
@@ -594,6 +936,8 @@ Json McpServer::gateway_health() const {
         devices.push_back({
             {"id", device.id},
             {"name", device.name},
+            {"protocol", device.protocol},
+            {"enabled", device.enabled},
             {"endpoint_type", mock ? "mock" : "opcua"},
             {"variable_count", static_cast<int>(device.variables.size())},
         });
@@ -610,6 +954,7 @@ Json McpServer::gateway_health() const {
         {"uptime_ms", uptime_ms},
         {"server", {{"name", config_.server.name}, {"version", config_.server.version}, {"read_only", config_.server.read_only}}},
         {"mcp", {{"transport", "stdio"}, {"protocol_version", kProtocolVersion}}},
+        {"transport", {{"mode", config_.transport.mode}, {"http_host", config_.http.host}, {"http_port", config_.http.port}}},
         {"opcua", {
             {"compiled", opcua_compiled()},
             {"connect_timeout_ms", config_.opcua.connect_timeout_ms},
@@ -626,6 +971,24 @@ Json McpServer::gateway_health() const {
             {"poll_interval_ms", config_.cache.poll_interval_ms},
             {"stale_after_ms", config_.cache.stale_after_ms},
         }},
+        {"security", {
+            {"enabled", config_.security.enabled},
+            {"default_role", config_.security.default_role},
+            {"role_count", static_cast<int>(config_.security.roles.size())},
+        }},
+        {"timeouts", {
+            {"mcp_request_ms", config_.timeouts.mcp_request_ms},
+            {"tool_execution_ms", config_.timeouts.tool_execution_ms},
+            {"opcua_request_ms", config_.timeouts.opcua_request_ms},
+        }},
+        {"observability", {
+            {"metrics_enabled", config_.observability.metrics_enabled},
+            {"metrics_port", config_.observability.metrics_port},
+        }},
+        {"storage", {
+            {"type", config_.storage.type},
+            {"sqlite_path_configured", !config_.storage.sqlite_path.empty()},
+        }},
         {"configuration", {
             {"device_count", static_cast<int>(config_.devices.size())},
             {"variable_count", static_cast<int>(variable_count)},
@@ -635,6 +998,36 @@ Json McpServer::gateway_health() const {
         }},
         {"read_only", true},
     };
+}
+
+Json McpServer::device_health(const std::string& device_id) {
+    const auto* device = find_device(config_, device_id);
+    if (device == nullptr) {
+        return {{"ok", false}, {"error", "DEVICE_NOT_FOUND"}, {"message", "unknown device_id: " + device_id}};
+    }
+
+    Json out = Json::object();
+    out["device_id"] = device_id;
+    out["name"] = device->name;
+    out["protocol"] = device->protocol;
+    out["enabled"] = device->enabled;
+    out["timestamp"] = now_utc_iso8601();
+    out["read_only"] = true;
+
+    if (!device->enabled) {
+        out["ok"] = false;
+        out["status"] = "disabled";
+        out["connection"] = Json::object();
+        out["cache"] = state_cache_.state_json(device_id);
+        return out;
+    }
+
+    const auto status = opcua_.get_status(*device, config_.opcua);
+    out["ok"] = status.online;
+    out["status"] = status.online ? "healthy" : "degraded";
+    out["connection"] = status_to_json(status);
+    out["cache"] = state_cache_.state_json(device_id);
+    return out;
 }
 
 } // namespace industrial_mcp

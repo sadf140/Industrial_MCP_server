@@ -40,6 +40,10 @@ public:
     explicit AlarmStore(std::string path);
 
     bool append(AlarmRecord alarm) const;
+    bool acknowledge(const std::string& alarm_id,
+                     const std::string& device_id,
+                     const std::string& user_id,
+                     const std::string& message = {}) const;
     std::vector<AlarmRecord> query(const AlarmQuery& query) const;
     Json query_json(const AlarmQuery& query) const;
     Json analyze_json(const AlarmQuery& query) const;

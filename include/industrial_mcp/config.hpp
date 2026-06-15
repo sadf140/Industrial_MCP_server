@@ -11,8 +11,17 @@ namespace industrial_mcp {
 
 struct ServerConfig {
     std::string name = "industrial-mcp-server";
-    std::string version = "0.4.0-p2";
+    std::string version = "0.5.0-p3";
     bool read_only = true;
+};
+
+struct TransportConfig {
+    std::string mode = "stdio";
+};
+
+struct HttpConfig {
+    std::string host = "127.0.0.1";
+    int port = 8080;
 };
 
 struct OpcUaRuntimeConfig {
@@ -34,6 +43,28 @@ struct CacheConfig {
     int stale_after_ms = 10000;
 };
 
+struct SecurityConfig {
+    bool enabled = true;
+    std::string default_role = "viewer";
+    std::unordered_map<std::string, std::vector<std::string>> roles;
+};
+
+struct TimeoutConfig {
+    int mcp_request_ms = 5000;
+    int tool_execution_ms = 3000;
+    int opcua_request_ms = 1000;
+};
+
+struct ObservabilityConfig {
+    bool metrics_enabled = false;
+    int metrics_port = 9090;
+};
+
+struct StorageConfig {
+    std::string type = "jsonl";
+    std::string sqlite_path;
+};
+
 struct VariableConfig {
     std::string name;
     std::string node_id;
@@ -42,6 +73,9 @@ struct VariableConfig {
     std::string description;
     Json mock_value;
     bool writable = false;
+    std::optional<double> write_min;
+    std::optional<double> write_max;
+    std::vector<Json> allowed_values;
     std::optional<double> warn_min;
     std::optional<double> warn_max;
     std::optional<double> alarm_min;
@@ -51,14 +85,22 @@ struct VariableConfig {
 struct DeviceConfig {
     std::string id;
     std::string name;
+    std::string protocol = "opcua";
     std::string endpoint;
+    bool enabled = true;
     std::unordered_map<std::string, VariableConfig> variables;
 };
 
 struct AppConfig {
     ServerConfig server;
+    TransportConfig transport;
+    HttpConfig http;
     OpcUaRuntimeConfig opcua;
     CacheConfig cache;
+    SecurityConfig security;
+    TimeoutConfig timeouts;
+    ObservabilityConfig observability;
+    StorageConfig storage;
     AuditConfig audit;
     std::string alarm_log_path;
     std::vector<DeviceConfig> devices;

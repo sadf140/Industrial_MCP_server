@@ -119,6 +119,31 @@
 
 `write_node` 不支持 raw `node_id` 写入，只接受配置白名单里的 `device_id` 和 `variable`。
 
+第三阶段增加 RBAC 与风险分级。默认角色 `viewer` 只能查询，`operator` 可执行低风险操作和经过配置允许的写操作，`administrator` 可访问全部工具。
+
+```json
+{
+  "security": {
+    "enabled": true,
+    "default_role": "viewer"
+  }
+}
+```
+
+变量写入还可以增加范围或枚举白名单：
+
+```json
+{
+  "name": "temperature",
+  "data_type": "Double",
+  "writable": true,
+  "min": 0,
+  "max": 120
+}
+```
+
+高风险操作使用 `prepare_device_action`、`confirm_device_action`、`cancel_device_action` 管理短时有效的 `operation_id`。当前实现只做审批生命周期管理，不直接新增设备启停动作。
+
 ## 运行日志
 
 进程会把启动、停止和启动失败等结构化 JSON 日志写入 stderr。MCP JSON-RPC 响应只写入 stdout。
@@ -126,7 +151,7 @@
 启动日志示例：
 
 ```json
-{"timestamp":"2026-06-12T08:00:00Z","level":"info","event":"server_starting","config_path":"config/config.example.json","server_name":"industrial-mcp-server","server_version":"0.4.0-p2","device_count":1,"read_only":true}
+{"timestamp":"2026-06-12T08:00:00Z","level":"info","event":"server_starting","config_path":"config/config.example.json","server_name":"industrial-mcp-server","server_version":"0.5.0-p3","device_count":1,"read_only":true}
 ```
 
 ## 审计

@@ -4,6 +4,8 @@ C++20 工业 MCP Server，用于让 Codex / VS Code 等 MCP 客户端通过 JSON
 
 当前版本基于 `open62541pp` 访问 OPC UA，使用 `nlohmann/json` 处理 MCP 与 JSON-RPC 消息，CMake 构建，主要目标平台为 Linux / Ubuntu，同时保持 Windows / MinGW 可构建。
 
+第三阶段开始引入生产级工程化能力：RBAC 工具权限、工具风险分级、统一请求上下文、增强审计、设备健康检查、缓存刷新、报警确认、两阶段高风险操作审批骨架，以及 Docker / systemd / Prometheus 部署资产。
+
 ## 核心功能
 
 最终 MCP 主接口包括 6 个工具：
@@ -29,6 +31,14 @@ C++20 工业 MCP Server，用于让 Codex / VS Code 等 MCP 客户端通过 JSON
 - `query_alarm_logs`
 - `analyze_alarms`
 - `get_gateway_health`
+- `get_server_health`
+- `get_device_health`
+- `refresh_device_state`
+- `acknowledge_alarm`
+- `clear_cached_alarm`
+- `prepare_device_action`
+- `confirm_device_action`
+- `cancel_device_action`
 
 ## 构建
 
@@ -171,10 +181,44 @@ config/config.opcua-sim.json
 - `cache.enabled`：是否启用后台周期采集和设备状态缓存。
 - `cache.poll_interval_ms`：后台采集周期，默认 `2000`。
 - `cache.stale_after_ms`：缓存超过该时长未更新后标记为 stale，默认 `10000`。
+- `security.enabled`：是否启用 RBAC 工具权限控制。
+- `security.default_role`：未提供调用上下文时使用的默认角色，默认 `viewer`。
+- `security.roles`：角色到 MCP 工具名的权限映射，`administrator` 可使用 `*`。
+- `timeouts.mcp_request_ms` / `tool_execution_ms` / `opcua_request_ms`：第三阶段分层超时配置。
+- `observability.metrics_enabled` / `metrics_port`：Prometheus 指标配置预留。
+- `storage.type` / `sqlite_path`：生产持久化配置预留，当前 JSONL 仍保持兼容。
 - `audit.log_path`：工具调用审计 JSONL 路径，留空关闭审计。
 - `alarm_log_path`：报警 JSONL 文件路径。
 - `devices[].endpoint`：支持 `mock://...` 和 `opc.tcp://...`。
+- `devices[].enabled`：是否启用设备。
+- `devices[].protocol`：工业协议类型，当前支持 `opcua`。
 - `devices[].variables[].writable`：变量是否允许 `write_node` 写入。
+- `devices[].variables[].min` / `max` / `allowed_values`：写入范围或枚举白名单。
+
+## 第三阶段安全工具
+
+默认角色 `viewer` 只能调用读类工具。低风险写操作和高风险操作需要 `operator` 或 `administrator` 权限。
+
+高风险操作采用两阶段审批骨架：
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"prepare_device_action","arguments":{"device_id":"pump-1","action":"stop"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"confirm_device_action","arguments":{"operation_id":"op-..."}}}
+```
+
+当前第三阶段骨架只完成 `operation_id` 生命周期管理，不直接执行新增设备启停动作。
+
+## 部署资产
+
+仓库包含：
+
+- `Dockerfile`
+- `compose.yaml`
+- `deploy/systemd/industrial-mcp-server.service`
+- `deploy/prometheus/prometheus.yml`
 
 ## 审计日志
 

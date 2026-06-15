@@ -250,6 +250,16 @@ void DeviceStateCache::refresh_once() {
     }
 }
 
+bool DeviceStateCache::clear_cached_alarm(const std::string& device_id, const std::string& variable) {
+    if (device_id.empty()) return false;
+    if (variable.empty()) {
+        clear_alarm_state(device_id + "|__communication");
+        return true;
+    }
+    clear_alarm_state(device_id + "|" + variable);
+    return true;
+}
+
 Json DeviceStateCache::state_json(const std::string& device_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     Json out = Json::object();
@@ -325,6 +335,8 @@ Json DeviceStateCache::state_to_json_locked(const DeviceState& state) const {
     out["device_id"] = state.device_id;
     out["online"] = state.online;
     out["stale"] = is_stale_locked(state);
+    out["cache_age_seconds"] = cache_age_seconds_locked(state);
+    out["device_connected"] = state.online && !is_stale_locked(state);
     out["status"] = is_stale_locked(state) ? "STALE" : state.status;
     out["last_update_time"] = state.last_update_time;
     out["last_error"] = state.last_error;
@@ -340,6 +352,13 @@ bool DeviceStateCache::is_stale_locked(const DeviceState& state) const {
     if (state.updated_at == std::chrono::steady_clock::time_point{}) return true;
     const auto stale_after = std::chrono::milliseconds(config_.cache.stale_after_ms > 0 ? config_.cache.stale_after_ms : 10000);
     return std::chrono::steady_clock::now() - state.updated_at > stale_after;
+}
+
+long long DeviceStateCache::cache_age_seconds_locked(const DeviceState& state) const {
+    if (state.updated_at == std::chrono::steady_clock::time_point{}) return -1;
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - state.updated_at
+    ).count();
 }
 
 void DeviceStateCache::append_alarm_if_changed(const std::string& key, const std::string& signature, AlarmRecord alarm) {

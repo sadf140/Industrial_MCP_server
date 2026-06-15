@@ -1,0 +1,22 @@
+services:
+  industrial-mcp:
+    build: .
+    command: ["--config", "/etc/industrial-mcp/config.json"]
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - ./config/config.example.json:/etc/industrial-mcp/config.json:ro
+      - mcp-data:/var/lib/industrial-mcp
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+volumes:
+  mcp-data:

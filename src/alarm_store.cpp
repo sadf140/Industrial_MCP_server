@@ -125,6 +125,25 @@ bool AlarmStore::append(AlarmRecord alarm) const {
     return static_cast<bool>(output);
 }
 
+bool AlarmStore::acknowledge(const std::string& alarm_id,
+                             const std::string& device_id,
+                             const std::string& user_id,
+                             const std::string& message) const {
+    AlarmRecord alarm;
+    alarm.alarm_id = alarm_id.empty() ? device_id + ":ACK:" + now_utc_iso8601() : alarm_id + ":ACK:" + now_utc_iso8601();
+    alarm.timestamp = now_utc_iso8601();
+    alarm.device_id = device_id;
+    alarm.level = "INFO";
+    alarm.severity = "INFO";
+    alarm.code = "ALARM_ACKNOWLEDGED";
+    alarm.message = message.empty() ? "alarm acknowledged by " + user_id : message;
+    alarm.state = "acknowledged";
+    alarm.source = "mcp_tool";
+    alarm.source_node = alarm_id;
+    alarm.acknowledged = true;
+    return append(std::move(alarm));
+}
+
 std::vector<AlarmRecord> AlarmStore::query(const AlarmQuery& query) const {
     auto alarms = load_all();
     std::vector<AlarmRecord> result;

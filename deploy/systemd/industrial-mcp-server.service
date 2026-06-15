@@ -1,0 +1,18 @@
+[Unit]
+Description=Industrial MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=industrial-mcp
+Group=industrial-mcp
+WorkingDirectory=/opt/industrial-mcp-server
+ExecStart=/usr/local/bin/industrial-mcp-server --config /etc/industrial-mcp/config.json
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,15 @@
 {
   "server": {
     "name": "industrial-mcp-server",
-    "version": "0.4.0-p2",
+    "version": "0.5.0-p3",
     "read_only": true
+  },
+  "transport": {
+    "mode": "stdio"
+  },
+  "http": {
+    "host": "127.0.0.1",
+    "port": 8080
   },
   "opcua": {
     "connect_timeout_ms": 3000,
@@ -17,6 +24,23 @@
     "poll_interval_ms": 2000,
     "stale_after_ms": 10000
   },
+  "security": {
+    "enabled": true,
+    "default_role": "viewer"
+  },
+  "timeouts": {
+    "mcp_request_ms": 5000,
+    "tool_execution_ms": 3000,
+    "opcua_request_ms": 1000
+  },
+  "observability": {
+    "metrics_enabled": false,
+    "metrics_port": 9090
+  },
+  "storage": {
+    "type": "jsonl",
+    "sqlite_path": "../data/industrial-mcp.sqlite"
+  },
   "audit": {
     "log_path": "../data/audit.example.jsonl"
   },
@@ -25,6 +49,8 @@
     {
       "id": "pump-1",
       "name": "Cooling Pump 1",
+      "protocol": "opcua",
+      "enabled": true,
       "endpoint": "mock://pump-1",
       "variables": [
         {

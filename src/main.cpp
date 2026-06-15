@@ -8,7 +8,7 @@
 
 namespace {
 
-constexpr const char* kBuildVersion = "0.4.0-p2";
+constexpr const char* kBuildVersion = "0.5.0-p3";
 
 void emit_log(const std::string& level, const std::string& event, const industrial_mcp::Json& fields = industrial_mcp::Json::object()) {
     auto record = fields.is_object() ? fields : industrial_mcp::Json::object();

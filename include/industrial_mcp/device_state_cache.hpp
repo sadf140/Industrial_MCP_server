@@ -54,6 +54,7 @@ public:
     void start();
     void stop();
     void refresh_once();
+    bool clear_cached_alarm(const std::string& device_id, const std::string& variable = {});
 
     bool enabled() const;
     Json state_json(const std::string& device_id = {}) const;
@@ -75,6 +76,7 @@ private:
     void worker_loop();
     Json state_to_json_locked(const DeviceState& state) const;
     bool is_stale_locked(const DeviceState& state) const;
+    long long cache_age_seconds_locked(const DeviceState& state) const;
     void append_alarm_if_changed(const std::string& key, const std::string& signature, AlarmRecord alarm);
     void clear_alarm_state(const std::string& key);
 };

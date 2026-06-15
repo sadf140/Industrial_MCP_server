@@ -147,6 +147,20 @@ get_device_state，device_id=pump-1
 diagnose_fault，device_id=pump-1
 ```
 
+## 第三阶段新增工具
+
+```text
+get_server_health
+get_device_health，device_id=pump-1
+refresh_device_state，device_id=pump-1
+acknowledge_alarm，device_id=pump-1，alarm_id=<alarm_id>
+prepare_device_action，device_id=pump-1，action=stop
+confirm_device_action，operation_id=<operation_id>
+cancel_device_action，operation_id=<operation_id>
+```
+
+默认配置下 `security.default_role=viewer`，只能调用读类工具。`config/config.opcua-sim.json` 用于本地模拟联调，默认角色为 `operator`，可测试低风险操作和受控写入。
+
 ## JSON-RPC 烟测试消息
 
 Server 从 stdin 接收一行一个 JSON-RPC 请求。

@@ -52,7 +52,7 @@ AppConfig make_mock_config(const std::string& audit_path = {}, const std::string
     const auto config_json = Json::parse(R"({
         "server": {
             "name": "industrial-mcp-server",
-            "version": "0.4.0-p2",
+            "version": "0.5.0-p3",
             "read_only": true
         },
         "opcua": {
@@ -137,6 +137,14 @@ void test_mcp_lifecycle_tools_and_audit() {
     assert(has_tool(tools, "diagnose_fault"));
     assert(has_tool(tools, "get_network_status"));
     assert(has_tool(tools, "get_device_state"));
+    assert(has_tool(tools, "get_server_health"));
+    assert(has_tool(tools, "get_device_health"));
+    assert(has_tool(tools, "refresh_device_state"));
+    assert(has_tool(tools, "acknowledge_alarm"));
+    assert(has_tool(tools, "clear_cached_alarm"));
+    assert(has_tool(tools, "prepare_device_action"));
+    assert(has_tool(tools, "confirm_device_action"));
+    assert(has_tool(tools, "cancel_device_action"));
 
     const auto health = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -148,7 +156,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     const auto& health_content = health->at("result").at("structuredContent");
     assert(health_content.at("ok").get<bool>());
     assert(health_content.at("read_only").get<bool>());
-    assert(health_content.at("server").at("version").get<std::string>() == "0.4.0-p2");
+    assert(health_content.at("server").at("version").get<std::string>() == "0.5.0-p3");
     assert(health_content.at("configuration").at("device_count").get<int>() == 1);
     assert(health_content.at("configuration").at("variable_count").get<int>() == 2);
     assert(health_content.at("uptime_ms").get<long long>() >= 0);
@@ -218,7 +226,7 @@ void test_mcp_lifecycle_tools_and_audit() {
     })"));
     assert(write_disabled.has_value());
     assert(write_disabled->at("result").at("isError").get<bool>());
-    assert(write_disabled->at("result").at("structuredContent").at("error").get<std::string>() == "WRITE_DISABLED");
+    assert(write_disabled->at("result").at("structuredContent").at("error").get<std::string>() == "PERMISSION_DENIED");
 
     const auto snapshot = server.handle_message(Json::parse(R"({
         "jsonrpc":"2.0",
@@ -389,11 +397,90 @@ void test_device_state_cache_and_auto_alarm() {
     std::remove(alarm_path.c_str());
 }
 
+void test_stage3_security_health_and_operations() {
+    const auto alarm_path = temp_file_path("industrial_mcp_stage3_alarm_test.jsonl");
+    std::remove(alarm_path.c_str());
+
+    auto viewer_config = make_mock_config({}, alarm_path);
+    McpServer viewer_server(viewer_config);
+
+    const auto server_health = viewer_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":80,
+        "method":"tools/call",
+        "params":{"name":"get_server_health","arguments":{}}
+    })"));
+    assert(server_health.has_value());
+    const auto& server_health_content = server_health->at("result").at("structuredContent");
+    assert(server_health_content.at("ok").get<bool>());
+    assert(server_health_content.at("security").at("enabled").get<bool>());
+    assert(server_health_content.at("timeouts").at("mcp_request_ms").get<int>() == 5000);
+
+    const auto device_health = viewer_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":81,
+        "method":"tools/call",
+        "params":{"name":"get_device_health","arguments":{"device_id":"pump-1"}}
+    })"));
+    assert(device_health.has_value());
+    assert(device_health->at("result").at("structuredContent").at("device_id").get<std::string>() == "pump-1");
+
+    const auto denied_refresh = viewer_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":82,
+        "method":"tools/call",
+        "params":{"name":"refresh_device_state","arguments":{"device_id":"pump-1"}}
+    })"));
+    assert(denied_refresh.has_value());
+    assert(denied_refresh->at("result").at("isError").get<bool>());
+    assert(denied_refresh->at("result").at("structuredContent").at("error").get<std::string>() == "PERMISSION_DENIED");
+
+    auto operator_config = make_mock_config({}, alarm_path);
+    operator_config.security.default_role = "operator";
+    McpServer operator_server(operator_config);
+
+    const auto ack = operator_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":83,
+        "method":"tools/call",
+        "params":{"name":"acknowledge_alarm","arguments":{"device_id":"pump-1","alarm_id":"alarm-1","message":"checked"}}
+    })"));
+    assert(ack.has_value());
+    assert(ack->at("result").at("structuredContent").at("ok").get<bool>());
+
+    const auto prepared = operator_server.handle_message(Json::parse(R"({
+        "jsonrpc":"2.0",
+        "id":84,
+        "method":"tools/call",
+        "params":{"name":"prepare_device_action","arguments":{"device_id":"pump-1","action":"stop"}}
+    })"));
+    assert(prepared.has_value());
+    const auto operation_id = prepared->at("result").at("structuredContent").at("operation_id").get<std::string>();
+    assert(!operation_id.empty());
+
+    Json confirm = {
+        {"jsonrpc", "2.0"},
+        {"id", 85},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "confirm_device_action"},
+            {"arguments", {{"operation_id", operation_id}}},
+        }},
+    };
+    const auto confirmed = operator_server.handle_message(confirm);
+    assert(confirmed.has_value());
+    assert(confirmed->at("result").at("structuredContent").at("confirmed").get<bool>());
+    assert(!confirmed->at("result").at("structuredContent").at("executed").get<bool>());
+
+    std::remove(alarm_path.c_str());
+}
+
 void test_write_node_policy_and_audit() {
     const auto audit_path = temp_file_path("industrial_mcp_write_audit_test.jsonl");
     std::remove(audit_path.c_str());
 
     auto config = make_mock_config(audit_path);
+    config.security.default_role = "operator";
     config.server.read_only = false;
     config.opcua.write_enabled = true;
     auto* device = const_cast<DeviceConfig*>(find_device(config, "pump-1"));
@@ -530,6 +617,7 @@ int main() {
     test_mcp_lifecycle_tools_and_audit();
     test_alarm_store_quality_and_ordering();
     test_device_state_cache_and_auto_alarm();
+    test_stage3_security_health_and_operations();
     test_write_node_policy_and_audit();
 #ifdef INDUSTRIAL_MCP_WITH_OPCUA
     test_opcua_integration();
